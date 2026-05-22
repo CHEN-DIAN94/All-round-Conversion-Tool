@@ -94,13 +94,7 @@ def convert_video(
         stderr=subprocess.PIPE,
     )
 
-    _monitor_ffmpeg_progress(proc, progress_callback, cancel_flag)
-
-    # 等待进程结束
-    stdout, stderr = proc.communicate()
-    if cancel_flag and cancel_flag[0]:
-        _kill_process(proc)
-        raise RuntimeError('用户取消了转换')
+    stderr = _run_ffmpeg_with_monitor(proc, progress_callback, cancel_flag)
 
     if proc.returncode != 0:
         error_msg = _extract_ffmpeg_error(stderr)
@@ -146,12 +140,7 @@ def convert_audio(
         stderr=subprocess.PIPE,
     )
 
-    _monitor_ffmpeg_progress(proc, progress_callback, cancel_flag)
-
-    stdout, stderr = proc.communicate()
-    if cancel_flag and cancel_flag[0]:
-        _kill_process(proc)
-        raise RuntimeError('用户取消了转换')
+    stderr = _run_ffmpeg_with_monitor(proc, progress_callback, cancel_flag)
 
     if proc.returncode != 0:
         error_msg = _extract_ffmpeg_error(stderr)
@@ -243,12 +232,15 @@ def convert_docx_to_pdf(input_path: str, output_path: str) -> str:
         # docx2pdf 内部使用 pywin32 调用 Word COM 对象
         from docx2pdf import convert as docx2pdf_convert
 
-        # docx2pdf 不支持直接输出到临时路径，我们在同目录转换后重命名
-        docx2pdf_convert(input_path, output_path)
+        # 写入临时文件，成功后再重命名
+        docx2pdf_convert(input_path, temp_path)
 
-        # docx2pdf 已写入 output_path，我们确保文件存在
-        if not os.path.isfile(output_path):
+        # 确保文件已生成
+        if not os.path.isfile(temp_path):
             raise RuntimeError('docx2pdf 未生成输出文件')
+
+        # 重命名 temp → 最终文件
+        finalize_file(temp_path, output_path)
 
     except pywintypes.com_error as e:
         error_msg = _parse_com_error(e)
@@ -344,20 +336,20 @@ def _detect_aac_encoder(ffmpeg_path: str) -> str:
     return 'aac'
 
 
-def _monitor_ffmpeg_progress(
+def _run_ffmpeg_with_monitor(
     proc: subprocess.Popen,
     progress_callback: Optional[Callable[[int], None]],
     cancel_flag: Optional[list],
-) -> None:
+) -> str:
     """
-    监控 ffmpeg 进度。
+    监控 ffmpeg 进度，读取 stderr，等待进程结束。
 
     通过读取 stderr 中的 time=... 信息估算转换进度。
     如果 cancel_flag 被设置为 True，立即终止进程。
-    """
-    if not progress_callback and not cancel_flag:
-        return
+    返回完整的 stderr 输出字符串供调用方分析错误。
 
+    注意：此函数会读取 proc.stderr，调用方不要再调用 proc.communicate()。
+    """
     import re
     import threading
 
@@ -365,39 +357,57 @@ def _monitor_ffmpeg_progress(
     time_pattern = re.compile(r'time=(\d+):(\d+):(\d+)\.(\d+)')
 
     total_seconds = None
+    stderr_lines = []
+    reading_done = threading.Event()
 
     def _reader():
         nonlocal total_seconds
-        for line in iter(proc.stderr.readline, ''):
-            if cancel_flag and cancel_flag[0]:
-                _kill_process(proc)
-                break
+        try:
+            for line in iter(proc.stderr.readline, ''):
+                stderr_lines.append(line)
 
-            # 解析总时长
-            if total_seconds is None:
-                m = duration_pattern.search(line)
-                if m:
-                    total_seconds = (
+                if cancel_flag and cancel_flag[0]:
+                    _kill_process(proc)
+                    break
+
+                # 解析总时长
+                if total_seconds is None:
+                    m = duration_pattern.search(line)
+                    if m:
+                        total_seconds = (
+                            int(m.group(1)) * 3600
+                            + int(m.group(2)) * 60
+                            + int(m.group(3))
+                        )
+
+                # 解析当前进度
+                m = time_pattern.search(line)
+                if m and total_seconds and progress_callback:
+                    current = (
                         int(m.group(1)) * 3600
                         + int(m.group(2)) * 60
                         + int(m.group(3))
                     )
+                    if total_seconds > 0:
+                        progress = min(int(current / total_seconds * 100), 99)
+                        progress_callback(progress)
+        except ValueError:
+            pass  # stderr 关闭后的读错误忽略
+        finally:
+            reading_done.set()
 
-            # 解析当前进度
-            m = time_pattern.search(line)
-            if m and total_seconds and progress_callback:
-                current = (
-                    int(m.group(1)) * 3600
-                    + int(m.group(2)) * 60
-                    + int(m.group(3))
-                )
-                if total_seconds > 0:
-                    progress = min(int(current / total_seconds * 100), 99)
-                    progress_callback(progress)
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
 
-    thread = threading.Thread(target=_reader, daemon=True)
-    thread.start()
-    thread.join(timeout=0.5)
+    # 等待 reader 线程结束（进程退出后 stderr 读取会自动结束）
+    reading_done.wait()
+    reader.join(timeout=3)
+
+    # 确保进程已结束
+    if proc.poll() is None:
+        proc.wait(timeout=10)
+
+    return ''.join(stderr_lines)
 
 
 def _kill_process(proc: subprocess.Popen) -> None:

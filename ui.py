@@ -10,12 +10,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import (
-    Qt, QUrl, QTimer,
-)
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent,
-    QAction, QIcon, QCloseEvent,
+    QCloseEvent,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
