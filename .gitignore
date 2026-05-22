@@ -24,3 +24,5 @@ desktop.ini
 *.local.json
 bin/ffmpeg.exe
 bin/*.exe
+*.o
+*.obj
