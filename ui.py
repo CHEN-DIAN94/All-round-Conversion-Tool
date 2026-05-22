@@ -13,7 +13,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent,
-    QCloseEvent,
+    QCloseEvent, QIcon,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from workers import ConversionWorker, FileStatus, BatchOrchestrator
 from utils import (
+    get_resource_path,
     get_file_size_str,
     map_format_to_category,
     ensure_output_dir,
@@ -238,6 +239,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(QLabel('输出格式:'), 1, 0)
         self._format_combo = QComboBox()
         self._format_combo.setMinimumWidth(350)
+        self._populate_format_combo('video')  # 默认选中视频类别
         top_layout.addWidget(self._format_combo, 1, 1)
 
         self._output_dir_btn = QPushButton('选择输出目录...')
@@ -365,6 +367,7 @@ class MainWindow(QMainWindow):
 
     def add_files_to_table(self, file_paths: list[str]) -> None:
         """将文件添加到表格。"""
+        first_category = None
         for fp in file_paths:
             # 检查是否已在列表中
             if self._is_file_in_table(fp):
@@ -396,6 +399,15 @@ class MainWindow(QMainWindow):
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setItem(row, COL_STATUS, status_item)
 
+            # 记录第一个文件的类别（用于自动跳转）
+            if first_category is None:
+                ext = Path(fp).suffix.lower().lstrip('.')
+                first_category = map_format_to_category(ext)
+
+        # 自动跳转到对应类别
+        if first_category and first_category != 'unknown':
+            self._switch_category(first_category)
+
         self._update_start_button()
 
     def _is_file_in_table(self, file_path: str) -> bool:
@@ -407,6 +419,17 @@ class MainWindow(QMainWindow):
                 if os.path.abspath(item.data(Qt.ItemDataRole.UserRole)) == abs_path:
                     return True
         return False
+
+    def _switch_category(self, category_key: str) -> None:
+        """切换到指定类别（更新按钮状态和格式下拉框）。"""
+        if category_key in self._category_btns:
+            btn = self._category_btns[category_key]
+            if not btn.isChecked():
+                btn.setChecked(True)
+                cat_keys = ['video', 'audio', 'image', 'document']
+                idx = cat_keys.index(category_key)
+                self._populate_format_combo(category_key)
+                self._update_start_button()
 
     def _on_category_changed(self, idx: int) -> None:
         """类别切换时更新格式下拉框。"""
@@ -713,68 +736,205 @@ def run_app() -> None:
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setApplicationName('全能格式转换工具')
+    app.setWindowIcon(QIcon(get_resource_path('icon.ico')))
 
-    # 全局样式
+    # 全局样式 — 现代简洁风格
     app.setStyleSheet("""
+        /* ===== 全局基础 ===== */
         QMainWindow {
-            background-color: #f5f5f5;
+            background-color: #f0f2f5;
         }
+        QWidget {
+            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-size: 13px;
+        }
+        QLabel {
+            color: #333;
+        }
+
+        /* ===== GroupBox ===== */
         QGroupBox {
             font-weight: bold;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            margin-top: 8px;
-            padding-top: 16px;
+            font-size: 13px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            margin-top: 10px;
+            padding-top: 18px;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-bottom: 12px;
+            background-color: #ffffff;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
             subcontrol-position: top left;
-            padding: 2px 8px;
-            background-color: #f5f5f5;
+            padding: 2px 10px;
+            background-color: #ffffff;
+            color: #1a1a2e;
         }
+
+        /* ===== 表格 ===== */
         QTableWidget {
-            border: 1px solid #ddd;
-            gridline-color: #eee;
-            background-color: white;
-            alternate-background-color: #fafafa;
-            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            gridline-color: #f0f0f0;
+            background-color: #ffffff;
+            alternate-background-color: #f8f9fb;
+            border-radius: 6px;
+            selection-background-color: #e3f2fd;
+            selection-color: #1a1a2e;
+            outline: none;
         }
         QTableWidget::item {
-            padding: 4px 8px;
+            padding: 6px 10px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        QTableWidget::item:selected {
+            background-color: #e3f2fd;
+            color: #1a1a2e;
         }
         QHeaderView::section {
-            background-color: #e8e8e8;
-            padding: 6px;
+            background-color: #f5f6f8;
+            color: #555;
+            padding: 8px 10px;
             border: none;
-            border-bottom: 1px solid #ccc;
+            border-bottom: 2px solid #e0e0e0;
             font-weight: bold;
+            font-size: 12px;
         }
+        QHeaderView::section:hover {
+            background-color: #eef0f4;
+        }
+
+        /* ===== 按钮 ===== */
         QPushButton {
-            padding: 6px 16px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            background-color: white;
+            padding: 7px 18px;
+            border: 1px solid #d0d0d0;
+            border-radius: 6px;
+            background-color: #ffffff;
+            color: #333;
+            font-size: 13px;
         }
         QPushButton:hover {
-            background-color: #e8e8e8;
+            background-color: #f0f0f0;
+            border-color: #bbb;
         }
+        QPushButton:pressed {
+            background-color: #e0e0e0;
+        }
+        QPushButton:disabled {
+            background-color: #f5f5f5;
+            color: #bbb;
+            border-color: #e8e8e8;
+        }
+
+        /* ===== 下拉框 ===== */
         QComboBox {
-            padding: 4px 8px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            background-color: white;
+            padding: 6px 10px;
+            border: 1px solid #d0d0d0;
+            border-radius: 6px;
+            background-color: #ffffff;
+            color: #333;
+            font-size: 13px;
+            min-height: 20px;
         }
-        QProgressBar {
-            border: 1px solid #ccc;
+        QComboBox:hover {
+            border-color: #0078D4;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 24px;
+            border-left: 1px solid #e0e0e0;
+            border-top-right-radius: 6px;
+            border-bottom-right-radius: 6px;
+        }
+        QComboBox QAbstractItemView {
+            border: 1px solid #d0d0d0;
             border-radius: 4px;
+            background-color: #ffffff;
+            selection-background-color: #e3f2fd;
+            selection-color: #1a1a2e;
+            padding: 4px;
+        }
+
+        /* ===== 进度条 ===== */
+        QProgressBar {
+            border: none;
+            border-radius: 6px;
             text-align: center;
             height: 22px;
+            background-color: #e8e8e8;
+            color: #555;
+            font-size: 12px;
+            font-weight: bold;
         }
         QProgressBar::chunk {
-            background-color: #0078D4;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0078D4, stop:1 #00a8ff);
+            border-radius: 6px;
+        }
+
+        /* ===== 状态栏 ===== */
+        QStatusBar {
+            background-color: #f5f6f8;
+            border-top: 1px solid #e0e0e0;
+            color: #666;
+            font-size: 12px;
+            padding: 4px;
+        }
+
+        /* ===== 复选框 ===== */
+        QCheckBox {
+            spacing: 6px;
+            color: #555;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #ccc;
             border-radius: 3px;
         }
+        QCheckBox::indicator:checked {
+            background-color: #0078D4;
+            border-color: #0078D4;
+        }
+
+        /* ===== 消息框 ===== */
+        QMessageBox {
+            background-color: #ffffff;
+        }
+        QMessageBox QLabel {
+            color: #333;
+            font-size: 13px;
+        }
+        QMessageBox QPushButton {
+            min-width: 80px;
+            padding: 6px 20px;
+        }
+
+        /* ===== 滚动条 ===== */
+        QScrollBar:vertical {
+            border: none;
+            background: #f5f5f5;
+            width: 8px;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:vertical {
+            background: #ccc;
+            border-radius: 4px;
+            min-height: 30px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #aaa;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
     """)
+
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
     window = MainWindow()
     window.show()
