@@ -70,22 +70,14 @@ def convert_video(
             temp_path,
         ]
     else:
-        # ---------- 步骤 2：选择编码器 ----------
-        encoder = _select_video_encoder(ffmpeg)
-        cmd = [
-            ffmpeg, '-y',
-            '-i', input_path,
-            '-c:v', encoder,
-            '-map_metadata', '0',
-            '-color_primaries', '1',
-            '-color_trc', '1',
-            '-colorspace', '1',
-            # 音频默认使用 AAC
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            # 进度信息输出到 stderr
-            temp_path,
-        ]
+        # ---------- 步骤 2：根据输出容器选择编码器 ----------
+        v_args, a_args = _select_video_codecs(ffmpeg, output_ext)
+        cmd = (
+            [ffmpeg, '-y', '-i', input_path]
+            + v_args
+            + a_args
+            + ['-map_metadata', '0', temp_path]
+        )
 
     # ---------- 步骤 3：执行转换 ----------
     proc = run_subprocess_popen(
@@ -101,6 +93,12 @@ def convert_video(
         raise RuntimeError(f'视频转换失败 (code={proc.returncode}): {error_msg}')
 
     # ---------- 步骤 4：完成 ----------
+    if not os.path.isfile(temp_path):
+        # 返回码为 0 但临时文件未生成 — 罕见，把 stderr 带出
+        raise RuntimeError(
+            f'ffmpeg 返回成功但未生成输出文件。'
+            f'stderr 末尾: {stderr[-400:].strip()}'
+        )
     finalize_file(temp_path, output_path)
     return output_path
 
@@ -114,23 +112,24 @@ def convert_audio(
     """
     音频格式转换。
 
-    始终重新编码以保证兼容性（音频直通场景较少且易出问题）。
-    优先检测 libfdk_aac（高质量 AAC），回退到 aac。
+    始终重新编码以保证兼容性。根据输出容器选择匹配的编码器：
+    .mp3 → libmp3lame, .wav → pcm_s16le, .flac → flac,
+    .ogg → libvorbis, .wma → wmav2, .aac/.m4a → aac/libfdk_aac
     """
     ffmpeg = get_ffmpeg_path()
+    output_ext = Path(output_path).suffix.lower()
     temp_path = safe_temp_path(output_path)
     ensure_output_dir(output_path)
 
-    # 检测可用的 AAC 编码器
-    aac_encoder = _detect_aac_encoder(ffmpeg)
+    encoder, extra_args = _select_audio_codec(ffmpeg, output_ext)
 
     cmd = [
         ffmpeg, '-y',
         '-i', input_path,
-        '-c:a', aac_encoder,
-        '-b:a', '192k',
+        '-vn',                  # 丢弃视频流（音频转换不需要）
+        '-c:a', encoder,
+    ] + extra_args + [
         '-map_metadata', '0',
-        '-id3v2_version', '3',
         temp_path,
     ]
 
@@ -146,6 +145,11 @@ def convert_audio(
         error_msg = _extract_ffmpeg_error(stderr)
         raise RuntimeError(f'音频转换失败 (code={proc.returncode}): {error_msg}')
 
+    if not os.path.isfile(temp_path):
+        raise RuntimeError(
+            f'ffmpeg 返回成功但未生成输出文件。'
+            f'stderr 末尾: {stderr[-400:].strip()}'
+        )
     finalize_file(temp_path, output_path)
     return output_path
 
@@ -265,41 +269,19 @@ def convert_docx_to_pdf(input_path: str, output_path: str) -> str:
 def _is_container_only(input_ext: str, output_ext: str) -> bool:
     """
     判断是否仅为容器格式转换（无需重新编码）。
-    当输入和输出的视频/音频编码兼容时返回 True。
+
+    只允许"内部编码格式肯定相同"的组合 -c copy 直通。
+    保守策略，宁愿多花点时间重编码也不要让转换失败。
     """
-    # 同格式无需重新编码
     if input_ext == output_ext:
         return True
 
-    # 常见容器直通组合：输入编码在这些容器中通常兼容
-    # 源格式 → MP4/MKV 等可以直接 copy
-    container_copy_pairs = {
-        '.mp4':  {'.mkv', '.mov', '.ts'},
-        '.mkv':  {'.mp4', '.mov'},
-        '.mov':  {'.mp4', '.mkv'},
-        '.avi':  {'.mkv', '.mp4'},
-        '.flv':  {'.mp4', '.mkv'},
-        '.ts':   {'.mp4', '.mkv'},
-        '.m4v':  {'.mp4', '.mkv'},
-        '.webm': {'.mp4', '.mkv'},
-    }
-    return output_ext in container_copy_pairs.get(input_ext, set())
+    # H.264/AAC 系容器之间通常可以互通
+    h264_family = {'.mp4', '.mkv', '.mov', '.ts', '.m4v'}
+    if input_ext in h264_family and output_ext in h264_family:
+        return True
 
-
-def _select_video_encoder(ffmpeg_path: str) -> str:
-    """
-    选择可用的最佳视频编码器。
-
-    优先级：h264_nvenc (NVIDIA) > h264_qsv (Intel QuickSync) > libx264 (软件)
-    """
-    encoders = _get_available_encoders(ffmpeg_path)
-
-    if 'h264_nvenc' in encoders:
-        return 'h264_nvenc'
-    if 'h264_qsv' in encoders:
-        return 'h264_qsv'
-    # 无 GPU 加速时降级到 libx264
-    return 'libx264'
+    return False
 
 
 def _get_available_encoders(ffmpeg_path: str) -> set:
@@ -334,6 +316,116 @@ def _detect_aac_encoder(ffmpeg_path: str) -> str:
     if 'libfdk_aac' in encoders:
         return 'libfdk_aac'
     return 'aac'
+
+
+def _select_audio_codec(ffmpeg_path: str, output_ext: str) -> tuple[str, list]:
+    """
+    根据输出扩展名选择音频编码器和必要的附加参数。
+    返回 (encoder_name, extra_ffmpeg_args)。
+    """
+    output_ext = output_ext.lower()
+    encoders = _get_available_encoders(ffmpeg_path)
+
+    if output_ext == '.mp3':
+        enc = 'libmp3lame' if 'libmp3lame' in encoders else 'mp3'
+        return enc, ['-b:a', '192k', '-id3v2_version', '3']
+    if output_ext == '.wav':
+        # 16-bit PCM 通用兼容
+        return 'pcm_s16le', []
+    if output_ext == '.flac':
+        return 'flac', ['-compression_level', '5']
+    if output_ext == '.ogg':
+        enc = 'libvorbis' if 'libvorbis' in encoders else 'vorbis'
+        return enc, ['-q:a', '5']
+    if output_ext == '.wma':
+        return 'wmav2', ['-b:a', '192k']
+    if output_ext in ('.aac', '.m4a'):
+        enc = 'libfdk_aac' if 'libfdk_aac' in encoders else 'aac'
+        return enc, ['-b:a', '192k']
+    if output_ext == '.opus':
+        return 'libopus', ['-b:a', '128k']
+    # 默认 fallback：让 ffmpeg 根据容器自选
+    return 'aac', ['-b:a', '192k']
+
+
+def _select_video_codecs(ffmpeg_path: str, output_ext: str) -> tuple[list, list]:
+    """
+    根据输出视频容器选择视频/音频编码器及参数。
+    返回 (video_args, audio_args)。
+    GIF 输出的音频参数列表会是 ['-an']（无音频）。
+    """
+    output_ext = output_ext.lower()
+    encoders = _get_available_encoders(ffmpeg_path)
+
+    if output_ext == '.gif':
+        # GIF：滤镜调整帧率/尺寸，去掉音频流（GIF 容器不支持音频）
+        return (
+            ['-vf', 'fps=12,scale=480:-2:flags=lanczos'],
+            ['-an'],
+        )
+
+    if output_ext == '.webm':
+        # WebM 容器要求 VP8/VP9 + Vorbis/Opus
+        venc = 'libvpx-vp9' if 'libvpx-vp9' in encoders else 'libvpx'
+        aenc = 'libopus' if 'libopus' in encoders else 'libvorbis'
+        return (
+            ['-c:v', venc, '-b:v', '1M', '-deadline', 'good', '-cpu-used', '4'],
+            ['-c:a', aenc, '-b:a', '128k'],
+        )
+
+    if output_ext == '.wmv':
+        return (
+            ['-c:v', 'wmv2', '-b:v', '2M'],
+            ['-c:a', 'wmav2', '-b:a', '192k'],
+        )
+
+    if output_ext == '.flv':
+        # FLV 通常 H.264 + AAC 或 MP3
+        venc = _select_h264_encoder(encoders)
+        return (
+            ['-c:v', venc, '-preset', 'medium', '-crf', '23'] if venc == 'libx264'
+            else ['-c:v', venc],
+            ['-c:a', 'aac', '-b:a', '192k', '-ar', '44100'],
+        )
+
+    if output_ext == '.avi':
+        # AVI 用 MPEG-4 part 2 通用兼容
+        venc = 'mpeg4'
+        return (
+            ['-c:v', venc, '-q:v', '5'],
+            ['-c:a', 'libmp3lame', '-b:a', '192k'] if 'libmp3lame' in encoders
+            else ['-c:a', 'mp3', '-b:a', '192k'],
+        )
+
+    # 默认 mp4/mov/mkv/ts/m4v：H.264 + AAC
+    venc = _select_h264_encoder(encoders)
+    if venc == 'libx264':
+        v_args = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+                  '-pix_fmt', 'yuv420p']
+    else:
+        # 硬件编码器
+        v_args = ['-c:v', venc, '-pix_fmt', 'yuv420p']
+    aenc = 'libfdk_aac' if 'libfdk_aac' in encoders else 'aac'
+    return (v_args, ['-c:a', aenc, '-b:a', '192k'])
+
+
+def _select_h264_encoder(encoders: set) -> str:
+    """
+    从可用编码器中挑一个 H.264 实现。
+
+    libx264（软件编码）优先 — 它最稳定且不受并发限制：
+    消费级 N 卡的 NVENC 只允许 2-3 路并发会话，
+    批量转换时多 worker 同时调用 NVENC 会触发 OpenEncodeSessionEx 失败。
+    """
+    if 'libx264' in encoders:
+        return 'libx264'
+    if 'h264_nvenc' in encoders:
+        return 'h264_nvenc'
+    if 'h264_qsv' in encoders:
+        return 'h264_qsv'
+    if 'h264_amf' in encoders:
+        return 'h264_amf'
+    return 'libx264'
 
 
 def _run_ffmpeg_with_monitor(

@@ -79,12 +79,18 @@ def run_subprocess_popen(args: list, **kwargs) -> subprocess.Popen:
 
 def safe_temp_path(target_path: str) -> str:
     """
-    生成安全的临时输出路径（同目录 + .tmp 后缀）。
+    生成安全的临时输出路径（同目录，保留原扩展名）。
 
-    废弃系统 tempfile：直接在与目标相同的目录下写入，
-    转换成功后再原子重命名，避免跨分区移动导致 I/O 开销。
+    关键：必须保留真实扩展名作为路径末尾，否则 ffmpeg 无法
+    从文件名推断输出 muxer / 容器格式，会报 "Unable to choose
+    an output format" 并以 EINVAL 退出。
+
+    例：foo.wmv  →  foo.~tmp.wmv
+
+    转换成功后再原子重命名为最终文件，避免跨分区移动导致 I/O 开销。
     """
-    return target_path + '.tmp'
+    p = Path(target_path)
+    return str(p.with_name(p.stem + '.~tmp' + p.suffix))
 
 
 def finalize_file(temp_path: str, target_path: str) -> None:

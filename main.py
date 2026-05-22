@@ -24,6 +24,16 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
+    # 在 QApplication 之前注册 AppUserModelID，
+    # 让任务栏图标/名称不再继承 python.exe
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            'AllInOneConverter.App'
+        )
+    except Exception:
+        pass
+
 
 def main():
     """应用程序入口。"""
