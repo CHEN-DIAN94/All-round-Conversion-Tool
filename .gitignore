@@ -6,11 +6,6 @@ __pycache__/
 dist/
 build/
 
-# Project temp
-icon.png
-launcher.c
-launcher.rc
-
 # Windows
 Thumbs.db
 desktop.ini
@@ -26,3 +21,15 @@ bin/ffmpeg.exe
 bin/*.exe
 *.o
 *.obj
+
+# Binary files
+*.exe
+*.dll
+*.so
+*.dylib
+
+# PyInstaller
+*.spec
+
+# Logs
+logs/

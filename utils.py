@@ -7,6 +7,7 @@ import sys
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 
 # Windows 下隐藏控制台窗口的标志
@@ -42,6 +43,46 @@ def get_ffmpeg_path() -> str:
     return 'ffmpeg'
 
 
+def get_ffprobe_path() -> str:
+    """
+    获取 ffprobe.exe 的路径。
+    优先查找项目 bin/ 目录，否则回退到系统 PATH。
+    """
+    bundled = get_resource_path(os.path.join('bin', 'ffprobe.exe'))
+    if os.path.isfile(bundled):
+        return bundled
+    # 与 ffmpeg 同目录查找
+    ffmpeg = get_ffmpeg_path()
+    if os.path.isfile(ffmpeg):
+        candidate = str(Path(ffmpeg).parent / 'ffprobe.exe')
+        if os.path.isfile(candidate):
+            return candidate
+    return 'ffprobe'
+
+
+def get_ffmpeg_version() -> str:
+    """获取 ffmpeg 版本字符串，失败返回空字符串。"""
+    try:
+        ffmpeg = get_ffmpeg_path()
+        result = subprocess.run(
+            [ffmpeg, '-version'],
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            timeout=5,
+        )
+        # 输出格式: "ffmpeg version 6.0-full_build ..."
+        first_line = result.stdout.splitlines()[0] if result.stdout else ''
+        if 'version' in first_line:
+            parts = first_line.split()
+            idx = parts.index('version')
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        return first_line[:50] if first_line else ''
+    except Exception:
+        return ''
+
+
 def run_subprocess(args: list, **kwargs) -> subprocess.CompletedProcess:
     """
     包装 subprocess.run，自动添加 CREATE_NO_WINDOW 隐藏黑框。
@@ -51,8 +92,6 @@ def run_subprocess(args: list, **kwargs) -> subprocess.CompletedProcess:
     # 仅在 Windows 下添加隐藏窗口标志
     if sys.platform == 'win32':
         kwargs.setdefault('creationflags', CREATE_NO_WINDOW)
-        # 也禁止创建新窗口组的标志
-        kwargs.setdefault('startupinfo', None)
 
     # 默认使用 UTF-8 编码捕获输出
     kwargs.setdefault('encoding', 'utf-8')
@@ -75,6 +114,66 @@ def run_subprocess_popen(args: list, **kwargs) -> subprocess.Popen:
     kwargs.setdefault('errors', 'replace')
 
     return subprocess.Popen(args, **kwargs)
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """
+    安全终止进程及其子进程树。
+
+    Windows 下用 taskkill /F /T 杀掉整棵进程树，
+    其他平台用 proc.kill()。超时后强制 kill。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == 'win32':
+            run_subprocess(
+                ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                capture_output=True,
+            )
+        else:
+            proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+class ProcessContext:
+    """
+    进程上下文管理器，确保子进程被正确清理。
+
+    用法:
+        with ProcessContext(cmd, stdout=subprocess.PIPE) as proc:
+            # 使用 proc
+            proc.wait()
+        # 退出 with 时自动杀死进程树（如果还在运行）
+    """
+
+    def __init__(self, cmd: list, **kwargs):
+        self.cmd = cmd
+        self.kwargs = kwargs
+        self.proc: subprocess.Popen | None = None
+
+    def __enter__(self) -> subprocess.Popen:
+        self.proc = subprocess.Popen(self.cmd, **self.kwargs)
+        return self.proc
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.proc is None:
+            return False
+        if self.proc.poll() is None:
+            self._kill_tree()
+        return False
+
+    def _kill_tree(self):
+        """杀死整个进程树。"""
+        kill_process_tree(self.proc)
 
 
 def safe_temp_path(target_path: str) -> str:
@@ -106,11 +205,8 @@ def finalize_file(temp_path: str, target_path: str) -> None:
     if temp_path == target_path:
         return
 
-    if target_path.exists():
-        target_path.unlink()
-
     if temp_path.exists():
-        temp_path.rename(target_path)
+        os.replace(str(temp_path), str(target_path))
 
 
 def get_file_size_str(file_path: str) -> str:
@@ -131,35 +227,38 @@ def ensure_output_dir(file_path: str) -> None:
     Path(file_path).resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
+# 扩展名 → 类别映射（懒加载，从 formats.py 的 CATEGORY_EXTS 自动生成，保证 SSOT）
+_CATEGORY_MAP: Optional[dict[str, str]] = None
+
+
+def _ensure_category_map() -> dict[str, str]:
+    """懒加载 _CATEGORY_MAP，从 formats.CATEGORY_EXTS 生成。"""
+    global _CATEGORY_MAP
+    if _CATEGORY_MAP is not None:
+        return _CATEGORY_MAP
+    # 延迟导入，打破循环引用：utils ← workers ← formats
+    from formats import CATEGORY_EXTS
+    _CATEGORY_MAP = {}
+    # RUNTIME-01: 使用 setdefault 避免后注册覆盖（如 spreadsheet 的 .jpg/.png 覆盖 image）
+    for _cat_key, _exts in CATEGORY_EXTS.items():
+        for _ext in _exts:
+            _CATEGORY_MAP.setdefault(_ext.lstrip('.'), _cat_key)
+    # 补充输入侧有但输出侧没有的扩展名（如 .doc, .svg 等）
+    _EXTRA_INPUT_MAP = {
+        'video': ('mts', 'm2ts', '3gp', 'ogv', 'vob', 'm4v', 'ts'),  # RUNTIME-05
+        'audio': ('ac3', 'dts', 'ape', 'aiff', 'opus'),  # RUNTIME-06
+        'image': ('tiff', 'tif', 'ico', 'svg', 'jpeg'),  # RUNTIME-04
+        'document': ('doc', 'txt', 'rtf', 'html', 'htm', 'md'),
+        'spreadsheet': ('xls', 'xlsx'),
+    }
+    for _cat_key, _exts in _EXTRA_INPUT_MAP.items():
+        for _ext in _exts:
+            _CATEGORY_MAP.setdefault(_ext, _cat_key)
+    # FIX-10: GIF 默认归入 video（视频转 GIF 场景更常见）
+    _CATEGORY_MAP['gif'] = 'video'
+    return _CATEGORY_MAP
+
+
 def map_format_to_category(fmt: str) -> str:
-    """
-    根据文件扩展名（不包含点号）推测所属类别。
-    返回 'video', 'audio', 'image', 'document' 或 'unknown'。
-    """
-    fmt = fmt.lower().lstrip('.')
-
-    video_exts = {
-        'mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'm4v',
-        'ts', 'mts', 'm2ts', '3gp', 'ogv', 'vob',
-    }
-    audio_exts = {
-        'mp3', 'wav', 'flac', 'aac', 'ogg', 'wma', 'm4a', 'opus',
-        'ac3', 'dts', 'ape', 'aiff',
-    }
-    image_exts = {
-        'jpg', 'jpeg', 'png', 'bmp', 'gif', 'tiff', 'tif', 'webp',
-        'ico', 'svg',
-    }
-    document_exts = {
-        'pdf', 'docx', 'doc', 'txt', 'rtf', 'html', 'htm', 'md',
-    }
-
-    if fmt in video_exts:
-        return 'video'
-    if fmt in audio_exts:
-        return 'audio'
-    if fmt in image_exts:
-        return 'image'
-    if fmt in document_exts:
-        return 'document'
-    return 'unknown'
+    """根据文件扩展名（不包含点号）推测所属类别。"""
+    return _ensure_category_map().get(fmt.lower().lstrip('.'), 'unknown')
