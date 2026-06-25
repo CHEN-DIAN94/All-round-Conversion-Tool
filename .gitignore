@@ -35,6 +35,9 @@ crash_dump.log
 *.exe
 build/
 
+# 二进制工具
+bin/
+
 # OS
 .DS_Store
 Thumbs.db
