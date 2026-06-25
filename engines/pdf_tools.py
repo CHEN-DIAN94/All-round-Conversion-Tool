@@ -1,7 +1,7 @@
 """
 engines.pdf_tools — PDF 合并/拆分工具
 
-基于 PyPDF2 实现，纯 Python，无需外部依赖。
+基于 pypdf 实现，纯 Python，无需外部依赖。
 """
 
 
@@ -29,20 +29,23 @@ def merge_pdfs(
     Returns:
         输出文件路径
     """
-    from pypdf import PdfMerger
+    from pypdf import PdfReader, PdfWriter
 
     _check_disk_space(output_path)
     ensure_output_dir(output_path)
 
-    merger = PdfMerger()
+    writer = PdfWriter()
     try:
         for p in input_paths:
             if not os.path.isfile(p):
                 raise FileNotFoundError(f'文件不存在: {p}')
-            merger.append(p)
-        merger.write(output_path)
+            reader = PdfReader(p)
+            for page in reader.pages:
+                writer.add_page(page)
+        with open(output_path, 'wb') as f:
+            writer.write(f)
     finally:
-        merger.close()
+        writer.close()
 
     return output_path
 
