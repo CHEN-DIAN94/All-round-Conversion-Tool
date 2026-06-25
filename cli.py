@@ -54,6 +54,19 @@ def main():
     parser.add_argument('--gif-fps', type=int, default=12, help='GIF 帧率（默认 12）')
     parser.add_argument('--gif-width', type=int, default=480, help='GIF 宽度（默认 480）')
     parser.add_argument('--gif-colors', type=int, default=256, help='GIF 颜色数（1-256，默认 256）')
+    parser.add_argument('--export-cmd', nargs=2, metavar=('INPUT', 'OUTPUT'),
+                        help='导出 ffmpeg 命令（不执行）')
+    parser.add_argument('--embed-sub', nargs=3, metavar=('VIDEO', 'SUBTITLE', 'OUTPUT'),
+                        help='嵌入字幕到视频')
+    parser.add_argument('--sub-lang', default='chi', help='字幕语言代码（默认 chi）')
+    parser.add_argument('--extract-sub', nargs=2, metavar=('VIDEO', 'OUTPUT'),
+                        help='从视频提取字幕')
+    parser.add_argument('--merge', nargs='+', help='合并多个音视频文件')
+    parser.add_argument('--crop', help='裁剪视频画面（输入路径）')
+    parser.add_argument('--crop-size', nargs=2, type=int, metavar=('WIDTH', 'HEIGHT'),
+                        help='裁剪尺寸')
+    parser.add_argument('--crop-pos', nargs=2, type=int, default=[0, 0], metavar=('X', 'Y'),
+                        help='裁剪起始位置（默认 0,0）')
     parser.add_argument('-v', '--verbose', action='store_true', help='详细输出')
     parser.add_argument('--version', action='version', version='流光 v1.1.0')
 
@@ -201,6 +214,51 @@ def main():
         )
         size_mb = os.path.getsize(result) / (1024*1024)
         print(f'✅ 视频转 GIF 完成: {result} ({size_mb:.1f} MB)')
+        return
+
+    # 导出 ffmpeg 命令
+    if args.export_cmd:
+        from engines.ffmpeg_utils import export_ffmpeg_cmd
+        inp, out = args.export_cmd
+        cmd = export_ffmpeg_cmd(inp, out, params={})
+        print(f'FFmpeg 命令:\n{cmd}')
+        return
+
+    # 嵌入字幕
+    if args.embed_sub:
+        from engines.ffmpeg_utils import embed_subtitle
+        video, sub, out = args.embed_sub
+        result = embed_subtitle(video, out, sub, language=args.sub_lang)
+        print(f'✅ 字幕嵌入完成: {result}')
+        return
+
+    # 提取字幕
+    if args.extract_sub:
+        from engines.ffmpeg_utils import extract_subtitle
+        video, out = args.extract_sub
+        result = extract_subtitle(video, out)
+        print(f'✅ 字幕提取完成: {result}')
+        return
+
+    # 合并音视频
+    if args.merge:
+        from engines.ffmpeg_utils import merge_media
+        output = args.output or _add_suffix(args.merge[0], '_merged')
+        result = merge_media(args.merge, output)
+        print(f'✅ 合并完成: {result}')
+        return
+
+    # 裁剪视频
+    if args.crop:
+        if not args.crop_size:
+            print('错误: 裁剪需要指定 --crop-size WIDTH HEIGHT', file=sys.stderr)
+            sys.exit(1)
+        from engines.ffmpeg_utils import crop_video
+        output = args.output or _add_suffix(args.crop, '_cropped')
+        w, h = args.crop_size
+        x, y = args.crop_pos
+        result = crop_video(args.crop, output, w, h, x, y)
+        print(f'✅ 裁剪完成: {result}')
         return
 
     # 常规转换

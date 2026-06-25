@@ -21,6 +21,10 @@ from engines.pdf_tools import merge_pdfs, split_pdf, get_pdf_info
 from engines.video_compress import compress_video
 from engines.image_resize import resize_image
 from engines.pdf_convert import pdf_to_images, images_to_pdf
+from engines.ffmpeg_utils import (
+    export_ffmpeg_cmd, embed_subtitle, extract_subtitle,
+    merge_media, crop_video,
+)
 
 __all__ = [
     # 核心转换
@@ -36,4 +40,7 @@ __all__ = [
     'merge_pdfs', 'split_pdf', 'get_pdf_info', 'pdf_to_images', 'images_to_pdf',
     # 视频工具
     'compress_video',
+    # FFmpeg 高级工具
+    'export_ffmpeg_cmd', 'embed_subtitle', 'extract_subtitle',
+    'merge_media', 'crop_video',
 ]
