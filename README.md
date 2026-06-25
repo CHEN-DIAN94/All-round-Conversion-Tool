@@ -188,14 +188,6 @@ pip install pyinstaller
 pyinstaller 流光.spec --distpath . --noconfirm
 ```
 
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-[MIT License](LICENSE)
-
 ---
 
 <p align="center">
