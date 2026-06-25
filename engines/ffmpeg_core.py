@@ -7,15 +7,22 @@ engines.ffmpeg_core — FFmpeg 视频/音频转换引擎
 - 编码器选择逻辑
 """
 
+
+__all__ = ['convert_video', 'convert_audio', 'extract_audio', 'trim_media', 'get_media_info']
+
 import os
 import re
 import sys
 import queue
 import subprocess
 import threading
+import json
 from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
+
+from logging_config import get_logger
+logger = get_logger(__name__)
 
 from utils import (
     get_ffmpeg_path,
@@ -140,6 +147,183 @@ def convert_audio(
         cancel_event=cancel_event,
         error_prefix='音频',
     )
+
+
+def extract_audio(
+    input_path: str,
+    output_path: str,
+    format: str = 'mp3',
+    progress_callback: Optional[Callable[[int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+    proc_ref: Optional[list] = None,
+) -> str:
+    """
+    从视频文件中提取音频轨道。
+
+    Args:
+        input_path: 输入视频路径
+        output_path: 输出音频路径（如 .mp3, .wav, .aac）
+        format: 目标音频格式（默认 mp3），覆盖 output_path 的扩展名推断
+        progress_callback: 进度回调（0-100）
+        cancel_event: 取消事件
+        proc_ref: 进程引用列表
+
+    Returns:
+        输出文件路径
+    """
+    ffmpeg = get_ffmpeg_path()
+    input_size_mb = os.path.getsize(input_path) / (1024 * 1024)
+    temp_path = _prepare_output(output_path, min_free_mb=max(int(input_size_mb * 2), 100))
+
+    codec_map = {
+        'mp3':  ['-c:a', 'libmp3lame', '-b:a', '192k'],
+        'aac':  ['-c:a', 'aac', '-b:a', '192k'],
+        'wav':  ['-c:a', 'pcm_s16le'],
+        'flac': ['-c:a', 'flac', '-compression_level', '5'],
+        'ogg':  ['-c:a', 'libvorbis', '-q:a', '5'],
+        'opus': ['-c:a', 'libopus', '-b:a', '128k'],
+    }
+    a_args = codec_map.get(format, ['-c:a', 'aac', '-b:a', '192k'])
+
+    cmd = [
+        ffmpeg, '-y',
+        '-i', input_path,
+        '-vn',
+        '-map_metadata', '0',
+    ] + a_args + [temp_path]
+
+    return _run_ffmpeg_convert(
+        cmd, temp_path, output_path,
+        proc_ref=proc_ref,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        error_prefix='音频提取',
+    )
+
+
+def trim_media(
+    input_path: str,
+    output_path: str,
+    start_time: str,
+    end_time: str,
+    progress_callback: Optional[Callable[[int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+    proc_ref: Optional[list] = None,
+) -> str:
+    """
+    裁剪视频/音频的指定时间段。
+
+    Args:
+        input_path: 输入文件路径
+        output_path: 输出文件路径
+        start_time: 起始时间（格式 'HH:MM:SS' 或秒数 '120'）
+        end_time: 结束时间（格式 'HH:MM:SS' 或秒数 '300'）
+        progress_callback: 进度回调
+        cancel_event: 取消事件
+        proc_ref: 进程引用列表
+
+    Returns:
+        输出文件路径
+    """
+    ffmpeg = get_ffmpeg_path()
+    input_size_mb = os.path.getsize(input_path) / (1024 * 1024)
+    temp_path = _prepare_output(output_path, min_free_mb=max(int(input_size_mb * 2), 100))
+
+    cmd = [
+        ffmpeg, '-y',
+        '-ss', str(start_time),
+        '-to', str(end_time),
+        '-i', input_path,
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
+        temp_path,
+    ]
+
+    return _run_ffmpeg_convert(
+        cmd, temp_path, output_path,
+        proc_ref=proc_ref,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        error_prefix='裁剪',
+    )
+
+
+def get_media_info(input_path: str) -> dict:
+    """
+    通过 ffprobe 获取媒体文件的详细信息。
+
+    Args:
+        input_path: 输入文件路径
+
+    Returns:
+        dict 包含以下字段：
+        - duration: 总时长（秒）
+        - video_codec: 视频编码名称
+        - audio_codec: 音频编码名称
+        - width: 视频宽度（像素）
+        - height: 视频高度（像素）
+        - video_bitrate: 视频比特率（bps）
+        - audio_bitrate: 音频比特率（bps）
+        - file_size: 文件大小（字节）
+        - format_name: 容器格式名称
+        - frame_rate: 帧率
+        - sample_rate: 音频采样率
+    """
+    ffprobe = get_ffprobe_path()
+    result = {
+        'duration': 0.0,
+        'video_codec': '',
+        'audio_codec': '',
+        'width': 0,
+        'height': 0,
+        'video_bitrate': 0,
+        'audio_bitrate': 0,
+        'file_size': 0,
+        'format_name': '',
+        'frame_rate': '',
+        'sample_rate': 0,
+    }
+
+    try:
+        result['file_size'] = os.path.getsize(input_path)
+    except OSError:
+        pass
+
+    try:
+        probe = run_subprocess(
+            [
+                ffprobe,
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(probe.stdout)
+    except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError) as exc:
+        logger.warning('ffprobe 探测失败: %s', exc)
+        return result
+
+    fmt = data.get('format', {})
+    result['duration'] = float(fmt.get('duration', 0))
+    result['format_name'] = fmt.get('format_name', '')
+
+    for stream in data.get('streams', []):
+        codec_type = stream.get('codec_type', '')
+        if codec_type == 'video' and not result['video_codec']:
+            result['video_codec'] = stream.get('codec_name', '')
+            result['width'] = int(stream.get('width', 0))
+            result['height'] = int(stream.get('height', 0))
+            result['video_bitrate'] = int(stream.get('bit_rate', 0))
+            result['frame_rate'] = stream.get('r_frame_rate', '')
+        elif codec_type == 'audio' and not result['audio_codec']:
+            result['audio_codec'] = stream.get('codec_name', '')
+            result['audio_bitrate'] = int(stream.get('bit_rate', 0))
+            result['sample_rate'] = int(stream.get('sample_rate', 0))
+
+    return result
 
 
 # ==============================================================
@@ -431,7 +615,7 @@ def _select_audio_codec(ffmpeg_path: str, output_ext: str, params: dict = None) 
     if output_ext == '.opus':
         return 'libopus', ['-b:a', audio_bitrate]
     # 默认 fallback：让 ffmpeg 根据容器自选
-    return 'aac', ['-b:a', audio_bitrate]
+    return 'aac', ['-b:a', audio_bitrate, '-ar', str(audio_sample_rate)]
 
 
 def _select_video_codecs(ffmpeg_path: str, output_ext: str, params: dict = None) -> tuple[list, list]:
@@ -496,7 +680,7 @@ def _select_video_codecs(ffmpeg_path: str, output_ext: str, params: dict = None)
     else:
         v_args = ['-c:v', venc, '-pix_fmt', 'yuv420p']
     aenc = _pick_encoder(encoders, 'libfdk_aac', 'aac')
-    return (v_args, ['-c:a', aenc, '-b:a', '192k'])
+    return (v_args, ['-c:a', aenc, '-b:a', audio_bitrate, '-ar', str(audio_sample_rate)])
 
 
 def _select_h264_encoder(encoders: set) -> str:

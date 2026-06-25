@@ -5,6 +5,9 @@ engines.document_engine — 文档格式转换引擎
 - convert_docx_to_pdf: DOCX → PDF（docx2pdf / pywin32 COM）
 """
 
+
+__all__ = ['convert_pdf_to_docx', 'convert_docx_to_pdf']
+
 import os
 from utils import finalize_file
 from engines._common import _prepare_output

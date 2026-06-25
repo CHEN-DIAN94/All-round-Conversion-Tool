@@ -6,19 +6,29 @@ widgets.py — 自定义 PyQt6 Widget
 - StatusColorDelegate: 状态列彩色绘制
 - ErrorDetailDialog: 错误详情对话框
 - AdvancedSettingsPanel: 高级参数设置面板
+- PreviewPanel: 文件预览面板（图片/视频封面）
 """
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QFont, QPainter
+
+__all__ = ['DropableTableWidget', 'StatusColorDelegate', 'ErrorDetailDialog', 'AdvancedSettingsPanel', 'PreviewPanel']
+
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QFont, QPainter, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QTableWidget, QStyledItemDelegate, QStyle,
     QDialog, QVBoxLayout, QTextEdit, QPushButton,
     QHBoxLayout, QApplication, QLabel, QWidget,
     QGroupBox, QFormLayout, QSpinBox, QComboBox,
-    QCheckBox, QSlider,
+    QCheckBox, QSlider, QSizePolicy,
 )
 
 from formats import STATUS_COLORS, _collect_files_from_paths
+from utils import get_ffmpeg_path, CREATE_NO_WINDOW
 
 
 # ==============================================================
@@ -302,3 +312,201 @@ class AdvancedSettingsPanel(QWidget):
         """外部设置参数。"""
         self._settings.update(settings)
         self._update_ui()
+
+
+# ==============================================================
+# PreviewPanel — 文件预览面板
+# ==============================================================
+
+# 图片和视频扩展名
+_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp', '.ico', '.heic', '.heif'}
+_VIDEO_EXTS = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.3gp', '.ogv', '.m2ts', '.vob'}
+
+
+class PreviewPanel(QWidget):
+    """
+    文件预览面板。
+
+    选中文件时自动显示预览：
+    - 图片：直接显示
+    - 视频：提取第一帧显示
+    - 其他：显示文件类型图标
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_path = ''
+        self._thumbnail_cache: dict[str, QPixmap] = {}  # path -> QPixmap 缓存
+        self._init_ui()
+
+    def _init_ui(self):
+        self.setObjectName('PreviewPanel')
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(200)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+
+        # 预览标签
+        self._preview_label = QLabel()
+        self._preview_label.setObjectName('PreviewLabel')
+        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_label.setMinimumHeight(100)
+        self._preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._preview_label)
+
+        # 文件信息标签
+        self._info_label = QLabel('选中文件以预览')
+        self._info_label.setObjectName('PreviewInfo')
+        self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info_label.setStyleSheet('font-size: 9pt; color: #888;')
+        layout.addWidget(self._info_label)
+
+        # 默认状态
+        self._show_empty()
+
+    def _show_empty(self):
+        """显示空状态。"""
+        self._preview_label.setText('🖼')
+        self._preview_label.setStyleSheet('font-size: 32pt; color: #ccc;')
+        self._info_label.setText('选中文件以预览')
+
+    def preview_file(self, file_path: str) -> None:
+        """预览指定文件。"""
+        if not file_path or not os.path.isfile(file_path):
+            self._show_empty()
+            return
+
+        if file_path == self._current_path:
+            return  # 已经在预览这个文件
+        self._current_path = file_path
+
+        ext = Path(file_path).suffix.lower()
+        file_size = os.path.getsize(file_path)
+        size_str = self._format_size(file_size)
+        file_name = os.path.basename(file_path)
+
+        if ext in _IMAGE_EXTS:
+            self._show_image(file_path, file_name, size_str)
+        elif ext in _VIDEO_EXTS:
+            self._show_video_thumbnail(file_path, file_name, size_str)
+        else:
+            self._show_generic(file_name, size_str, ext)
+
+    def _show_image(self, file_path: str, name: str, size: str):
+        """显示图片预览。"""
+        pixmap = QPixmap(file_path)
+        if pixmap.isNull():
+            self._show_generic(name, size, Path(file_path).suffix)
+            return
+
+        # 缩放到预览区域
+        scaled = pixmap.scaled(
+            self._preview_label.width() - 16,
+            160,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._preview_label.setPixmap(scaled)
+        self._preview_label.setStyleSheet('')
+        self._info_label.setText(f'{name}  |  {size}  |  {pixmap.width()}×{pixmap.height()}')
+
+    def _show_video_thumbnail(self, file_path: str, name: str, size: str):
+        """显示视频封面（ffmpeg 提取第一帧）。"""
+        # 检查缓存
+        if file_path in self._thumbnail_cache:
+            pixmap = self._thumbnail_cache[file_path]
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self._preview_label.width() - 16, 160,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._preview_label.setPixmap(scaled)
+                self._preview_label.setStyleSheet('')
+                self._info_label.setText(f'🎬 {name}  |  {size}')
+                return
+
+        # 提取封面
+        pixmap = self._extract_thumbnail(file_path)
+        if pixmap and not pixmap.isNull():
+            self._thumbnail_cache[file_path] = pixmap
+            scaled = pixmap.scaled(
+                self._preview_label.width() - 16, 160,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._preview_label.setPixmap(scaled)
+            self._preview_label.setStyleSheet('')
+            self._info_label.setText(f'🎬 {name}  |  {size}')
+        else:
+            self._show_generic(name, size, '.mp4')
+            self._info_label.setText(f'🎬 {name}  |  {size}  |  无法提取封面')
+
+    def _extract_thumbnail(self, file_path: str) -> QPixmap:
+        """用 ffmpeg 提取视频第一帧。"""
+        ffmpeg = get_ffmpeg_path()
+        # 检查 ffmpeg 是否可用
+        if not ffmpeg or ffmpeg == 'ffmpeg':
+            # 尝试系统 ffmpeg
+            pass
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+
+        try:
+            cmd = [
+                ffmpeg, '-y',
+                '-i', file_path,
+                '-vframes', '1',
+                '-q:v', '2',
+                tmp_path,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
+            if result.returncode == 0 and os.path.isfile(tmp_path):
+                pixmap = QPixmap(tmp_path)
+                return pixmap
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        return QPixmap()
+
+    def _show_generic(self, name: str, size: str, ext: str):
+        """显示通用文件信息。"""
+        icons = {
+            '.mp4': '🎬', '.avi': '🎬', '.mkv': '🎬', '.mov': '🎬',
+            '.mp3': '🎵', '.wav': '🎵', '.flac': '🎵', '.aac': '🎵',
+            '.pdf': '📄', '.docx': '📄', '.doc': '📄',
+            '.xlsx': '📊', '.xls': '📊',
+            '.zip': '📦', '.rar': '📦',
+        }
+        icon = icons.get(ext, '📎')
+        self._preview_label.setText(icon)
+        self._preview_label.setStyleSheet(f'font-size: 48pt;')
+        self._info_label.setText(f'{icon} {name}  |  {size}')
+
+    def clear(self):
+        """清空预览。"""
+        self._current_path = ''
+        self._show_empty()
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """格式化文件大小。"""
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if size_bytes < 1024:
+                return f'{size_bytes:.1f} {unit}'
+            size_bytes /= 1024
+        return f'{size_bytes:.1f} TB'

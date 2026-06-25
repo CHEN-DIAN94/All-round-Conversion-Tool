@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liuguang"
+version = "1.1.0"
+description = "流光 — 视频/音频/图片/文档/表格格式转换"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "All-in-One Converter Team"},
+]
+keywords = ["converter", "ffmpeg", "pyqt6", "video", "audio", "image"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Sound/Audio :: Conversion",
+]
+dependencies = [
+    "PyQt6>=6.5.0",
+    "Pillow>=10.0.0",
+    "openpyxl>=3.1.0",
+    "pdf2docx>=0.5.0",
+    "docx2pdf>=0.1.0",
+    "pywin32>=306; sys_platform == 'win32'",
+    "pillow-heif>=0.16.0",
+    "pypdf>=4.0.0",
+    "pdf2image>=1.16.0",
+    "opencv-python-headless>=4.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-qt>=4.2",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+converter = "cli:main"
+
+[project.gui-scripts]
+liuguang = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["*.py", "engines/*.py", "themes/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

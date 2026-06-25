@@ -9,6 +9,9 @@ workers.py — 并发调度与工作线程管理
   终态必达：任何路径都保证发射 finished_one 信号。
 """
 
+
+__all__ = ['FileStatus', 'WorkerState', 'ConversionWorker', 'BatchOrchestrator']
+
 import os
 import threading
 from enum import Enum, auto
@@ -33,13 +36,7 @@ from utils import CREATE_NO_WINDOW, kill_process_tree
 # 状态枚举
 # ==============================================================
 
-class FileStatus:
-    """文件转换状态（UI 层使用）"""
-    WAITING = '等待中'
-    CONVERTING = '转换中'
-    SUCCESS = '成功'
-    FAILED = '失败'
-    CANCELLED = '已取消'
+from constants import FileStatus
 
 
 class WorkerState(Enum):

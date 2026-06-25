@@ -5,11 +5,15 @@ engines.excel_engine — Excel → 图片转换引擎
 支持多工作表（纵向拼接）、自动列宽、网格线、表头高亮。
 """
 
+
+__all__ = ['convert_excel_to_image']
+
 from pathlib import Path
 from typing import Callable, Optional
 
 from utils import finalize_file
 from engines._common import _prepare_output
+from constants import MAX_CANVAS_PIXELS
 
 
 # 缓存 Pillow 字体对象（避免每次 Excel→图片转换重复加载）
@@ -43,6 +47,9 @@ def convert_excel_to_image(
     """
     from openpyxl import load_workbook
     from PIL import Image, ImageDraw, ImageFont
+
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError(f'输入文件不存在: {input_path}')
 
     temp_path = _prepare_output(output_path, min_free_mb=100)
 
@@ -142,7 +149,6 @@ def convert_excel_to_image(
     canvas_height = sum(si['height'] + label_height + gap for si in sheet_infos) + 20
 
     # FIX-08: 内存保护 — 超限直接拒绝，避免 OOM
-    MAX_CANVAS_PIXELS = 4096 * 4096  # 约 48MB (RGB)
     if canvas_width * canvas_height > MAX_CANVAS_PIXELS:
         raise RuntimeError(
             f'Excel 表格过大（渲染尺寸 {canvas_width}×{canvas_height}），'

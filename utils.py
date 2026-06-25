@@ -3,6 +3,9 @@ utils.py — 底层工具函数
 提供资源寻址、幽灵黑框消除、文件直出等基础能力。
 """
 
+
+__all__ = ['get_resource_path', 'get_ffmpeg_path', 'get_ffprobe_path', 'get_ffmpeg_version', 'run_subprocess', 'run_subprocess_popen', 'kill_process_tree', 'ProcessContext', 'safe_temp_path', 'finalize_file', 'get_file_size_str', 'ensure_output_dir', 'map_format_to_category', 'CREATE_NO_WINDOW']
+
 import sys
 import os
 import subprocess
@@ -247,15 +250,16 @@ def _ensure_category_map() -> dict[str, str]:
     _EXTRA_INPUT_MAP = {
         'video': ('mts', 'm2ts', '3gp', 'ogv', 'vob', 'm4v', 'ts'),  # RUNTIME-05
         'audio': ('ac3', 'dts', 'ape', 'aiff', 'opus'),  # RUNTIME-06
-        'image': ('tiff', 'tif', 'ico', 'svg', 'jpeg'),  # RUNTIME-04
+        'image': ('tiff', 'tif', 'ico', 'svg', 'jpeg', 'heic', 'heif'),  # RUNTIME-04
         'document': ('doc', 'txt', 'rtf', 'html', 'htm', 'md'),
         'spreadsheet': ('xls', 'xlsx'),
     }
     for _cat_key, _exts in _EXTRA_INPUT_MAP.items():
         for _ext in _exts:
             _CATEGORY_MAP.setdefault(_ext, _cat_key)
-    # FIX-10: GIF 默认归入 video（视频转 GIF 场景更常见）
-    _CATEGORY_MAP['gif'] = 'video'
+    # FIX-10: GIF 默认归入 image（用户持有 .gif 文件时通常期望图片类别）
+    # 视频转 GIF 场景仍可用，用户手动选"视频"类别即可
+    _CATEGORY_MAP['gif'] = 'image'
     return _CATEGORY_MAP
 
 

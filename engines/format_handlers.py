@@ -5,6 +5,9 @@ engines.format_handlers — 格式特殊处理注册表
 封装为独立 Handler，新增格式只需注册，无需修改引擎代码。
 """
 
+
+__all__ = ['FormatHandler', 'IcoHandler', 'BmpHandler', 'GifHandler', 'TiffHandler', 'get_format_handler']
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -49,7 +52,7 @@ class IcoHandler(FormatHandler):
             img = img.convert('RGBA')
         return img
 
-    def get_default_params(self) -> dict:
+    def get_default_params(self, img: Image.Image = None) -> dict:
         return {'format': 'ICO'}
 
 
@@ -111,7 +114,7 @@ class TiffHandler(FormatHandler):
     def prepare_output(self, img: Image.Image) -> Image.Image:
         return img
 
-    def get_default_params(self) -> dict:
+    def get_default_params(self, img: Image.Image = None) -> dict:
         return {'compression': 'tiff_lzw'}
 
 

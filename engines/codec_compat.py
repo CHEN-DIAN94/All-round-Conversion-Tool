@@ -5,6 +5,9 @@ engines.codec_compat — 编解码器兼容性矩阵
 替代原 ffmpeg_core.py 中的硬编码判断。
 """
 
+
+__all__ = ['ContainerSpec', 'is_container_copy_possible', 'get_incompatible_reason']
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 

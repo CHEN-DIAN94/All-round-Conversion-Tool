@@ -5,6 +5,9 @@ ui.py — 全能格式转换工具主界面
 支持拖拽文件、批量转换、实时进度、取消操作。
 """
 
+
+__all__ = ['MainWindow', 'run_app']
+
 import os
 import sys
 import time
@@ -16,6 +19,7 @@ from PyQt6.QtCore import Qt, QSettings, QSize
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent,
     QCloseEvent, QIcon,
+    QShortcut, QKeySequence,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -41,7 +45,14 @@ from formats import (
     COL_FILE_NAME, COL_FILE_SIZE, COL_PROGRESS, COL_STATUS, COL_COUNT,
     STATUS_COLORS, _is_legacy_doc, _collect_files_from_paths,
 )
-from widgets import DropableTableWidget, StatusColorDelegate, ErrorDetailDialog, AdvancedSettingsPanel
+from widgets import DropableTableWidget, StatusColorDelegate, ErrorDetailDialog, AdvancedSettingsPanel, PreviewPanel
+from constants import (
+    VERSION, MAX_FILES_PER_BATCH,
+    WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT,
+    WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT,
+    BUTTON_MIN_HEIGHT, SHUTDOWN_WAIT_MS,
+)
+from themes import THEMES, DEFAULT_THEME, get_theme_qss, get_theme_keys, get_theme_display
 
 
 class MainWindow(QMainWindow):
@@ -89,8 +100,8 @@ class MainWindow(QMainWindow):
         self._settings = QSettings(
             QSettings.Format.IniFormat,
             QSettings.Scope.UserScope,
-            'AllInOneConverter',
-            'AllInOneConverter',
+            'LiuGuang',
+            'LiuGuang',
         )
         self._loading_settings = False
 
@@ -98,11 +109,12 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_settings()
         self._cleanup_stale_temps()
+        self._check_ffmpeg()
 
     def _init_ui(self) -> None:
         """初始化界面。"""
-        self.setWindowTitle('全能格式转换工具')
-        self.setMinimumSize(1000, 720)
+        self.setWindowTitle('流光')
+        self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.setAcceptDrops(True)
 
         central = QWidget()
@@ -141,10 +153,21 @@ class MainWindow(QMainWindow):
         header_layout.addStretch()
 
         # 版本标签
-        version_label = QLabel('v1.0')
+        version_label = QLabel(f'v{VERSION}')
         version_label.setObjectName('SectionHint')
-        version_label.setStyleSheet('color: #334155; font-size: 9pt;')
+        version_label.setStyleSheet('font-size: 9pt;')
         header_layout.addWidget(version_label)
+
+        # 主题切换
+        self._theme_combo = QComboBox()
+        self._theme_combo.setObjectName('ThemeCombo')
+        self._theme_combo.setMinimumWidth(120)
+        self._theme_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        for key in get_theme_keys():
+            display = get_theme_display(key)
+            self._theme_combo.addItem(display, key)
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        header_layout.addWidget(self._theme_combo)
 
         layout.addWidget(header)
 
@@ -257,6 +280,10 @@ class MainWindow(QMainWindow):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
         layout.addWidget(sep)
+
+        # ---------- 预览面板 ----------
+        self._preview_panel = PreviewPanel(self)
+        layout.addWidget(self._preview_panel)
 
         # ---------- 文件列表标题 ----------
         list_header = QHBoxLayout()
@@ -395,6 +422,12 @@ class MainWindow(QMainWindow):
         self._cancel_btn.setMinimumHeight(42)
         self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        self._retry_btn = QPushButton('↻ 重试失败')
+        self._retry_btn.setObjectName('SecondaryButton')
+        self._retry_btn.setVisible(False)
+        self._retry_btn.setMinimumHeight(42)
+        self._retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
         self._start_btn = QPushButton('▶  全部开始')
         self._start_btn.setObjectName('PrimaryButton')
         self._start_btn.setEnabled(False)
@@ -403,6 +436,7 @@ class MainWindow(QMainWindow):
         self._start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
         btn_layout.addWidget(self._open_dir_btn)
+        btn_layout.addWidget(self._retry_btn)
         btn_layout.addWidget(self._cancel_btn)
         btn_layout.addWidget(self._start_btn)
 
@@ -415,7 +449,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage('就绪')
 
-        self.resize(1060, 760)
+        self.resize(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)
 
     def _update_empty_state(self) -> None:
         """根据文件列表是否为空切换空状态/表格。"""
@@ -449,6 +483,7 @@ class MainWindow(QMainWindow):
         self._remove_selected_btn.clicked.connect(self._on_remove_selected)
         self._start_btn.clicked.connect(self._on_start_all)
         self._cancel_btn.clicked.connect(self._on_cancel)
+        self._retry_btn.clicked.connect(self._on_retry_failed)
         self._output_dir_btn.clicked.connect(self._on_select_output_dir)
         self._open_dir_btn.clicked.connect(self._on_open_output_dir)
         self._advanced_btn.clicked.connect(self._on_toggle_advanced)
@@ -457,6 +492,13 @@ class MainWindow(QMainWindow):
         self._format_combo.currentIndexChanged.connect(self._save_settings)
         self._overwrite_check.stateChanged.connect(self._save_settings)
         self._table.itemDoubleClicked.connect(self._on_table_double_clicked)
+        self._table.currentItemChanged.connect(self._on_table_selection_changed)
+
+        # 键盘快捷键
+        QShortcut(QKeySequence('Ctrl+O'), self).activated.connect(self._on_add_file)
+        QShortcut(QKeySequence('Delete'), self).activated.connect(self._on_remove_selected)
+        QShortcut(QKeySequence('Ctrl+A'), self).activated.connect(self._table.selectAll)
+        QShortcut(QKeySequence('Escape'), self).activated.connect(self._on_cancel)
 
     # ---------- 拖拽支持 ----------
 
@@ -476,8 +518,8 @@ class MainWindow(QMainWindow):
 
     def add_files_to_table(self, file_paths: list[str]) -> None:
         """将文件添加到表格。"""
-        if len(file_paths) >= 500:
-            QMessageBox.information(self, '提示', '最多同时添加 500 个文件，已截断。')
+        if len(file_paths) >= MAX_FILES_PER_BATCH:
+            QMessageBox.information(self, '提示', f'最多同时添加 {MAX_FILES_PER_BATCH} 个文件，已截断。')
         first_category = None
         added_count = 0
         for fp in file_paths:
@@ -568,7 +610,7 @@ class MainWindow(QMainWindow):
     _CATEGORY_FILTERS = {
         'video': '视频文件 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm *.m4v *.ts *.3gp *.ogv *.m2ts *.vob)',
         'audio': '音频文件 (*.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a *.opus *.ac3 *.dts *.ape *.aiff)',
-        'image': '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif *.tiff *.tif *.webp *.ico *.svg)',
+        'image': '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif *.tiff *.tif *.webp *.ico *.svg *.heic *.heif)',
         'document': '文档文件 (*.pdf *.docx *.doc *.txt *.rtf *.html *.htm *.md)',
         'spreadsheet': '表格文件 (*.xlsx *.xls)',
     }
@@ -595,6 +637,7 @@ class MainWindow(QMainWindow):
             return
         self._table.setRowCount(0)
         self._file_paths_set.clear()  # 同步清空去重缓存
+        self._preview_panel.clear()  # 清空预览
         self._progress_bar.setValue(0)
         self._progress_label.setText('0 / 0')
         self._update_start_button()
@@ -630,6 +673,23 @@ class MainWindow(QMainWindow):
             self._advanced_btn.setText('⚙ 收起设置')
         else:
             self._advanced_btn.setText('⚙ 高级设置')
+
+    def _on_theme_changed(self, idx: int) -> None:
+        """主题切换。"""
+        key = self._theme_combo.currentData()
+        if key:
+            self._apply_theme(key)
+            self._save_settings()
+
+    def _apply_theme(self, theme_key: str) -> None:
+        """应用指定主题（含动画）。"""
+        from themes import activate_animation
+        qss = get_theme_qss(theme_key)
+        if qss:
+            QApplication.instance().setStyleSheet(qss)
+        self._current_theme = theme_key
+        # 激活动画（如有）
+        activate_animation(theme_key, self)
 
     def _on_advanced_settings_changed(self, settings: dict) -> None:
         """高级设置变更回调。"""
@@ -670,8 +730,8 @@ class MainWindow(QMainWindow):
 
     # ---------- 转换控制 ----------
 
-    def _on_start_all(self) -> None:
-        """全部开始转换。"""
+    def _on_start_all(self, retry_rows: list = None) -> None:
+        """全部开始转换。retry_rows 指定时只重试指定行。"""
         row_count = self._table.rowCount()
         if row_count == 0:
             return
@@ -679,7 +739,8 @@ class MainWindow(QMainWindow):
         # 校验文件存在性
         missing = []
         valid_files: set[str] = set()
-        for row in range(row_count):
+        check_rows = retry_rows if retry_rows is not None else range(row_count)
+        for row in check_rows:
             item = self._table.item(row, COL_FILE_NAME)
             if item:
                 fp = item.data(Qt.ItemDataRole.UserRole)
@@ -701,8 +762,8 @@ class MainWindow(QMainWindow):
             return
         output_ext, category_key = fmt_data
 
-        # 重置状态
-        for row in range(row_count):
+        # 重置状态（仅处理目标行）
+        for row in check_rows:
             self._table.item(row, COL_STATUS).setText(FileStatus.WAITING)
             progress_bar = self._table.cellWidget(row, COL_PROGRESS)
             if isinstance(progress_bar, QProgressBar):
@@ -710,7 +771,7 @@ class MainWindow(QMainWindow):
 
         # 创建 worker
         workers = []
-        for row in range(row_count):
+        for row in check_rows:
             input_path = self._table.item(row, COL_FILE_NAME).data(
                 Qt.ItemDataRole.UserRole)
             if not input_path or input_path not in valid_files:
@@ -855,6 +916,8 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(msg)
 
         if failed > 0:
+            self._retry_btn.setVisible(True)
+            self._retry_btn.setText(f'↻ 重试失败 ({failed})')
             QMessageBox.information(
                 self, '转换完成',
                 msg + '\n\n双击失败的文件行可查看具体错误原因。',
@@ -894,6 +957,60 @@ class MainWindow(QMainWindow):
                         pass
 
     # ---------- 辅助方法 ----------
+
+    def _check_ffmpeg(self) -> None:
+        """启动时检测 ffmpeg，不可用时提示用户。"""
+        from utils import get_ffmpeg_version
+        ver = get_ffmpeg_version()
+        if not ver:
+            self._status_bar.showMessage('⚠ FFmpeg 未检测到，视频/音频转换将不可用')
+
+    def _on_retry_failed(self) -> None:
+        """重试所有失败的文件。"""
+        if self._is_converting:
+            return
+        failed_rows = []
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, COL_STATUS)
+            if item and item.text() == FileStatus.FAILED:
+                failed_rows.append(row)
+        if not failed_rows:
+            return
+        self._retry_btn.setVisible(False)
+        self._on_start_all(retry_rows=failed_rows)
+
+    def _open_file(self, file_path: str) -> None:
+        """用系统默认程序打开文件。"""
+        if sys.platform == 'win32':
+            os.startfile(file_path)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', file_path])
+        else:
+            subprocess.Popen(['xdg-open', file_path])
+
+    def _reveal_in_explorer(self, file_path: str) -> None:
+        """在文件管理器中定位文件。"""
+        if sys.platform == 'win32':
+            subprocess.Popen(['explorer', '/select,', file_path],
+                           creationflags=CREATE_NO_WINDOW)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', '-R', file_path])
+        else:
+            subprocess.Popen(['xdg-open', str(Path(file_path).parent)])
+
+    def _get_output_path_for(self, row: int) -> str:
+        """获取指定行的输出文件路径。"""
+        fmt_data = self._format_combo.currentData()
+        if not fmt_data:
+            return ''
+        output_ext, _ = fmt_data
+        name_item = self._table.item(row, COL_FILE_NAME)
+        if not name_item:
+            return ''
+        input_path = name_item.data(Qt.ItemDataRole.UserRole)
+        if not input_path:
+            return ''
+        return self._generate_output_path(input_path, output_ext)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         """统一启用/禁用所有操作控件。"""
@@ -1025,6 +1142,21 @@ class MainWindow(QMainWindow):
             self._settings.endGroup()
             self._advanced_panel.set_settings(self._advanced_settings)
 
+            # 加载主题
+            saved_theme = self._settings.value('theme', DEFAULT_THEME, type=str)
+            if saved_theme not in THEMES:
+                saved_theme = DEFAULT_THEME
+            self._current_theme = saved_theme
+            # 设置下拉框选中项（不触发信号）
+            self._theme_combo.blockSignals(True)
+            for i in range(self._theme_combo.count()):
+                if self._theme_combo.itemData(i) == saved_theme:
+                    self._theme_combo.setCurrentIndex(i)
+                    break
+            self._theme_combo.blockSignals(False)
+            # 应用主题
+            self._apply_theme(saved_theme)
+
         finally:
             self._loading_settings = False
         self._update_start_button()
@@ -1052,9 +1184,27 @@ class MainWindow(QMainWindow):
             self._settings.setValue(key, value)
         self._settings.endGroup()
 
+        # 保存主题
+        if hasattr(self, '_current_theme'):
+            self._settings.setValue('theme', self._current_theme)
+
         self._settings.sync()
 
     # ---------- 表格交互 ----------
+
+    def _on_table_selection_changed(self, current, previous) -> None:
+        """表格选中行变化时更新预览。"""
+        if current is None:
+            self._preview_panel.clear()
+            return
+        row = current.row()
+        if row < 0:
+            return
+        name_item = self._table.item(row, COL_FILE_NAME)
+        if name_item:
+            file_path = name_item.data(Qt.ItemDataRole.UserRole)
+            if file_path:
+                self._preview_panel.preview_file(file_path)
 
     def _on_table_double_clicked(self, item: QTableWidgetItem) -> None:
         """双击行查看详情（失败文件弹出详情对话框）。"""
@@ -1088,6 +1238,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         status_item = self._table.item(row, COL_STATUS)
         status_text = status_item.text() if status_item else ''
+        name_item = self._table.item(row, COL_FILE_NAME)
+        file_path = name_item.data(Qt.ItemDataRole.UserRole) if name_item else ''
 
         if self._is_converting and status_text == FileStatus.CONVERTING:
             cancel_action = menu.addAction('取消此文件')
@@ -1098,6 +1250,21 @@ class MainWindow(QMainWindow):
                 lambda: self._on_table_double_clicked(
                     self._table.item(row, COL_FILE_NAME))
             )
+
+        # 文件操作（非转换中）
+        if not self._is_converting and file_path:
+            if os.path.isfile(file_path):
+                open_action = menu.addAction('打开文件')
+                open_action.triggered.connect(lambda: self._open_file(file_path))
+
+                reveal_action = menu.addAction('打开所在文件夹')
+                reveal_action.triggered.connect(lambda: self._reveal_in_explorer(file_path))
+
+            if status_text == FileStatus.SUCCESS:
+                output_path = self._get_output_path_for(row)
+                if output_path and os.path.isfile(output_path):
+                    open_output = menu.addAction('打开输出文件')
+                    open_output.triggered.connect(lambda: self._open_file(output_path))
 
         # 导出失败报告（有失败文件时显示）
         has_failures = self._has_failed_files()
@@ -1183,6 +1350,10 @@ class MainWindow(QMainWindow):
 
         self._save_settings()
 
+        # 停止主题动画
+        from themes import stop_current_animation
+        stop_current_animation()
+
         # 优雅退出三步协议
         if self._orchestrator and self._orchestrator.workers:
             # Step 1: 发送取消信号
@@ -1196,21 +1367,11 @@ class MainWindow(QMainWindow):
             progress.show()
             QApplication.processEvents()
 
-            self._orchestrator.wait_all(5000)
+            self._orchestrator.wait_all(SHUTDOWN_WAIT_MS)
 
             progress.close()
 
         event.accept()
-
-
-def _load_stylesheet() -> str:
-    """从 styles.qss 加载样式表。"""
-    qss_path = get_resource_path('styles.qss')
-    try:
-        with open(qss_path, encoding='utf-8') as f:
-            return f.read()
-    except (OSError, IOError):
-        return ''
 
 
 def _apply_windows_taskbar_identity() -> None:
@@ -1232,9 +1393,9 @@ def run_app() -> None:
 
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    app.setApplicationName('全能格式转换工具')
-    app.setApplicationDisplayName('全能格式转换工具')
-    app.setOrganizationName('AllInOneConverter')
+    app.setApplicationName('流光')
+    app.setApplicationDisplayName('流光')
+    app.setOrganizationName('LiuGuang')
 
     icon = QIcon(get_resource_path('icon.ico'))
     app.setWindowIcon(icon)

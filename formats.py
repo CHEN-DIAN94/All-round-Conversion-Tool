@@ -4,9 +4,12 @@ formats.py — 格式定义、映射表和文件辅助函数
 从 ui.py 提取的纯数据定义，供 ui.py 和 widgets.py 共同使用。
 """
 
+
+__all__ = ['CATEGORY_KEYS', 'FORMAT_BY_KEY', 'FORMAT_CATEGORIES', 'CATEGORY_EXTS', 'CONVERSION_MAP', 'COL_FILE_NAME', 'COL_FILE_SIZE', 'COL_PROGRESS', 'COL_STATUS', 'COL_COUNT', 'STATUS_COLORS', '_is_legacy_doc', '_collect_files_from_paths', 'map_format_to_category']
+
 import os
 
-from workers import FileStatus
+from constants import MAX_FILES_PER_BATCH, FileStatus
 
 
 # 类别键列表（多处引用，统一定义）
@@ -101,7 +104,7 @@ def _collect_files_from_paths(paths: list[str]) -> list[str]:
 
     防御：限制最大文件数 500，防止恶意/异常目录树导致卡死。
     """
-    MAX_FILES = 500
+    MAX_FILES = MAX_FILES_PER_BATCH
     result = []
     seen: set[str] = set()
 
