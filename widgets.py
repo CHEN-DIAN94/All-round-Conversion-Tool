@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout, QSpinBox, QComboBox,
     QCheckBox, QSlider, QSizePolicy,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
+    QStackedWidget,
 )
 
 from formats import STATUS_COLORS, _collect_files_from_paths
@@ -800,3 +801,676 @@ class PresetCombo(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self._pm.delete_preset(name)
             self._load_presets()
+
+
+# ==============================================================
+# ToolPanel — 工具面板
+# ==============================================================
+
+# ──────────────────────────────────────────────
+# 工具定义（按子类别分组）
+# ──────────────────────────────────────────────
+# 格式: (key, 显示名称, 子类别, 文件过滤器key, 输出扩展名)
+# 子类别: 'video' / 'image' / 'document'
+# 文件过滤器key: 'video' / 'image' / 'document' / 'audio_video' / 'pdf' / 'all'
+
+TOOL_CATEGORIES = [
+    ('video', '🎬 视频工具'),
+    ('image', '🖼 图片工具'),
+    ('document', '📄 文档工具'),
+]
+TOOL_CAT_KEYS = [c[0] for c in TOOL_CATEGORIES]
+
+TOOLS = [
+    # ── 视频工具 ──
+    ('export_cmd',       '导出 FFmpeg 命令',  'video',    'video',        None),
+    ('embed_subtitle',   '嵌入字幕',          'video',    'video',        '.mp4'),
+    ('extract_subtitle', '提取字幕',          'video',    'video',        '.srt'),
+    ('extract_audio',    '提取音频',          'video',    'video',        '.mp3'),
+    ('merge_media',      '合并音视频',        'video',    'audio_video',  '.mp4'),
+    ('crop_video',       '画面裁剪',          'video',    'video',        '.mp4'),
+    ('trim_media',       '截取片段',          'video',    'audio_video',  None),
+    ('compress_video',   '视频压缩',          'video',    'video',        None),
+    ('video_to_gif',     '视频转 GIF',        'video',    'video',        '.gif'),
+    ('media_info',       '媒体信息',          'video',    'all',          None),
+    # ── 图片工具 ──
+    ('compress_image',   '图片压缩',          'image',    'image',        None),
+    ('resize_image',     '图片缩放',          'image',    'image',        None),
+    ('add_watermark',    '添加水印',          'image',    'image',        None),
+    # ── 文档工具 ──
+    ('merge_pdfs',       '合并 PDF',          'document', 'pdf',          '.pdf'),
+    ('split_pdf',        '拆分 PDF',          'document', 'pdf',          None),
+    ('pdf_to_images',    'PDF 转图片',        'document', 'pdf',          None),
+    ('images_to_pdf',    '图片转 PDF',        'document', 'image',        '.pdf'),
+]
+
+TOOL_KEYS = [t[0] for t in TOOLS]
+TOOL_BY_KEY = {t[0]: t for t in TOOLS}
+
+_FILE_FILTERS = {
+    'video':       '视频文件 (*.mp4 *.avi *.mkv *.mov *.wmv *.webm *.flv *.ts *.m4v);;所有文件 (*.*)',
+    'audio_video': '音视频文件 (*.mp4 *.avi *.mkv *.mov *.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a);;所有文件 (*.*)',
+    'image':       '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif *.tiff *.webp *.ico *.heic);;所有文件 (*.*)',
+    'document':    '文档文件 (*.pdf *.docx);;所有文件 (*.*)',
+    'pdf':         'PDF 文件 (*.pdf);;所有文件 (*.*)',
+    'all':         '所有文件 (*.*)',
+}
+
+
+class ToolPanel(QWidget):
+    """工具面板：按子类别选择工具，动态显示参数。"""
+
+    tool_changed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_tool = None
+        self._page_map = {}
+        self._subtitle_path = ''
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # 子类别 + 工具选择
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        self._cat_combo = QComboBox()
+        self._cat_combo.setMinimumHeight(36)
+        for cat_key, cat_name in TOOL_CATEGORIES:
+            self._cat_combo.addItem(cat_name, cat_key)
+        self._cat_combo.currentIndexChanged.connect(self._on_cat_changed)
+        row.addWidget(self._cat_combo)
+
+        self._tool_combo = QComboBox()
+        self._tool_combo.setMinimumHeight(36)
+        self._tool_combo.setMinimumWidth(200)
+        self._tool_combo.currentIndexChanged.connect(self._on_tool_changed)
+        row.addWidget(self._tool_combo, 1)
+
+        layout.addLayout(row)
+
+        # 参数栈
+        self._params_stack = QStackedWidget()
+        layout.addWidget(self._params_stack)
+
+        # 构建所有工具的参数页
+        self._build_all_pages()
+
+        # 初始化第一个子类别
+        self._on_cat_changed(0)
+
+    def _build_all_pages(self):
+        """为每个工具创建参数页面。"""
+        for tool_key, tool_name, cat, filt, ext in TOOLS:
+            page = self._build_tool_page(tool_key)
+            idx = self._params_stack.addWidget(page)
+            self._page_map[tool_key] = idx
+
+    def _build_tool_page(self, tool_key: str) -> QWidget:
+        """构建单个工具的参数页面。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(6)
+
+        if tool_key == 'export_cmd':
+            hint = QLabel('点击"执行"后，将在日志中输出对应的 FFmpeg 命令（不实际执行）。')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        elif tool_key == 'embed_subtitle':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('字幕文件')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._sub_path_label = QLabel('未选择')
+            self._sub_path_label.setObjectName('SectionHint')
+            row.addWidget(self._sub_path_label, 1)
+            btn_browse = QPushButton('浏览')
+            btn_browse.setObjectName('SecondaryButton')
+            btn_browse.setFixedWidth(60)
+            btn_browse.clicked.connect(self._browse_subtitle)
+            row.addWidget(btn_browse)
+            layout.addLayout(row)
+
+            row2 = QHBoxLayout()
+            row2.setSpacing(12)
+            lbl2 = QLabel('语言')
+            lbl2.setObjectName('FieldLabel')
+            lbl2.setFixedWidth(70)
+            row2.addWidget(lbl2)
+            self._lang_combo = QComboBox()
+            self._lang_combo.setMinimumHeight(36)
+            langs = [('chi', '中文'), ('eng', '英文'), ('jpn', '日语'),
+                     ('kor', '韩语'), ('fre', '法语'), ('ger', '德语'),
+                     ('spa', '西班牙语'), ('por', '葡萄牙语')]
+            for i, (code, name) in enumerate(langs):
+                self._lang_combo.addItem(name)
+                self._lang_combo.setItemData(i, code)
+            row2.addWidget(self._lang_combo)
+            row2.addStretch()
+            layout.addLayout(row2)
+
+        elif tool_key == 'extract_subtitle':
+            hint = QLabel('从视频中提取字幕流，输出为 .srt 文件。')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        elif tool_key == 'extract_audio':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('音频格式')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._extract_audio_fmt = QComboBox()
+            self._extract_audio_fmt.setMinimumHeight(36)
+            self._extract_audio_fmt.addItems(['MP3', 'WAV', 'FLAC', 'AAC', 'OGG', 'OPUS'])
+            self._extract_audio_fmt.setItemData(0, 'mp3')
+            self._extract_audio_fmt.setItemData(1, 'wav')
+            self._extract_audio_fmt.setItemData(2, 'flac')
+            self._extract_audio_fmt.setItemData(3, 'aac')
+            self._extract_audio_fmt.setItemData(4, 'ogg')
+            self._extract_audio_fmt.setItemData(5, 'opus')
+            row.addWidget(self._extract_audio_fmt)
+            row.addStretch()
+            layout.addLayout(row)
+
+        elif tool_key == 'merge_media':
+            hint = QLabel('添加多个同格式文件，按添加顺序合并为一个文件。')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        elif tool_key == 'crop_video':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('裁剪尺寸')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._crop_w = QSpinBox()
+            self._crop_w.setRange(2, 7680)
+            self._crop_w.setValue(1920)
+            self._crop_w.setPrefix('宽 ')
+            self._crop_w.setMinimumHeight(36)
+            row.addWidget(self._crop_w)
+            self._crop_h = QSpinBox()
+            self._crop_h.setRange(2, 4320)
+            self._crop_h.setValue(1080)
+            self._crop_h.setPrefix('高 ')
+            self._crop_h.setMinimumHeight(36)
+            row.addWidget(self._crop_h)
+            self._crop_x = QSpinBox()
+            self._crop_x.setRange(0, 7680)
+            self._crop_x.setValue(0)
+            self._crop_x.setPrefix('X ')
+            self._crop_x.setMinimumHeight(36)
+            row.addWidget(self._crop_x)
+            self._crop_y = QSpinBox()
+            self._crop_y.setRange(0, 4320)
+            self._crop_y.setValue(0)
+            self._crop_y.setPrefix('Y ')
+            self._crop_y.setMinimumHeight(36)
+            row.addWidget(self._crop_y)
+            row.addStretch()
+            layout.addLayout(row)
+
+        elif tool_key == 'trim_media':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('时间段')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._trim_start = QComboBox()
+            self._trim_start.setEditable(True)
+            self._trim_start.setMinimumHeight(36)
+            self._trim_start.setMinimumWidth(120)
+            self._trim_start.setCurrentText('00:00:00')
+            row.addWidget(QLabel('从'))
+            row.addWidget(self._trim_start)
+            self._trim_end = QComboBox()
+            self._trim_end.setEditable(True)
+            self._trim_end.setMinimumHeight(36)
+            self._trim_end.setMinimumWidth(120)
+            self._trim_end.setCurrentText('00:01:00')
+            row.addWidget(QLabel('到'))
+            row.addWidget(self._trim_end)
+            hint = QLabel('(格式: HH:MM:SS 或秒数)')
+            hint.setObjectName('SectionHint')
+            row.addWidget(hint)
+            row.addStretch()
+            layout.addLayout(row)
+
+        elif tool_key == 'compress_video':
+            layout.setContentsMargins(0, 0, 0, 0)
+            row1 = QHBoxLayout()
+            row1.setSpacing(12)
+            lbl1 = QLabel('CRF 质量')
+            lbl1.setObjectName('FieldLabel')
+            lbl1.setFixedWidth(70)
+            row1.addWidget(lbl1)
+            self._compress_crf = QSpinBox()
+            self._compress_crf.setRange(0, 51)
+            self._compress_crf.setValue(28)
+            self._compress_crf.setToolTip('0=无损 23=默认 28=高压缩 51=最差')
+            self._compress_crf.setMinimumHeight(36)
+            row1.addWidget(self._compress_crf)
+            lbl1b = QLabel('缩放宽度')
+            lbl1b.setObjectName('FieldLabel')
+            row1.addWidget(lbl1b)
+            self._compress_scale = QSpinBox()
+            self._compress_scale.setRange(0, 7680)
+            self._compress_scale.setValue(0)
+            self._compress_scale.setSpecialValueText('不缩放')
+            self._compress_scale.setMinimumHeight(36)
+            row1.addWidget(self._compress_scale)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            row2 = QHBoxLayout()
+            row2.setSpacing(12)
+            lbl2 = QLabel('目标大小')
+            lbl2.setObjectName('FieldLabel')
+            lbl2.setFixedWidth(70)
+            row2.addWidget(lbl2)
+            self._compress_target_mb = QSpinBox()
+            self._compress_target_mb.setRange(0, 99999)
+            self._compress_target_mb.setValue(0)
+            self._compress_target_mb.setSuffix(' MB')
+            self._compress_target_mb.setSpecialValueText('不限制')
+            self._compress_target_mb.setMinimumHeight(36)
+            self._compress_target_mb.setToolTip('0=用CRF模式，>0=按目标大小自动计算码率')
+            row2.addWidget(self._compress_target_mb)
+            row2.addStretch()
+            layout.addLayout(row2)
+
+        elif tool_key == 'video_to_gif':
+            layout.setContentsMargins(0, 0, 0, 0)
+            row1 = QHBoxLayout()
+            row1.setSpacing(12)
+            lbl1 = QLabel('帧率')
+            lbl1.setObjectName('FieldLabel')
+            lbl1.setFixedWidth(70)
+            row1.addWidget(lbl1)
+            self._gif_fps = QSpinBox()
+            self._gif_fps.setRange(1, 30)
+            self._gif_fps.setValue(12)
+            self._gif_fps.setMinimumHeight(36)
+            self._gif_fps.setToolTip('推荐 10-15，社交媒体用 12')
+            row1.addWidget(self._gif_fps)
+            lbl2 = QLabel('宽度')
+            lbl2.setObjectName('FieldLabel')
+            row1.addWidget(lbl2)
+            self._gif_width = QSpinBox()
+            self._gif_width.setRange(32, 1920)
+            self._gif_width.setValue(480)
+            self._gif_width.setSuffix(' px')
+            self._gif_width.setMinimumHeight(36)
+            row1.addWidget(self._gif_width)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            row2 = QHBoxLayout()
+            row2.setSpacing(12)
+            lbl3 = QLabel('颜色数')
+            lbl3.setObjectName('FieldLabel')
+            lbl3.setFixedWidth(70)
+            row2.addWidget(lbl3)
+            self._gif_colors = QSpinBox()
+            self._gif_colors.setRange(2, 256)
+            self._gif_colors.setValue(256)
+            self._gif_colors.setMinimumHeight(36)
+            self._gif_colors.setToolTip('256=最高质量，64=小体积')
+            row2.addWidget(self._gif_colors)
+            row2.addStretch()
+            layout.addLayout(row2)
+
+        elif tool_key == 'media_info':
+            hint = QLabel('选择文件后点击"执行"，将弹窗显示媒体详细信息。')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        elif tool_key == 'compress_image':
+            layout.setContentsMargins(0, 0, 0, 0)
+            row1 = QHBoxLayout()
+            row1.setSpacing(12)
+            lbl = QLabel('压缩质量')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row1.addWidget(lbl)
+            self._img_quality = QSpinBox()
+            self._img_quality.setRange(1, 100)
+            self._img_quality.setValue(80)
+            self._img_quality.setMinimumHeight(36)
+            row1.addWidget(self._img_quality)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            row2 = QHBoxLayout()
+            row2.setSpacing(12)
+            lbl2 = QLabel('目标大小')
+            lbl2.setObjectName('FieldLabel')
+            lbl2.setFixedWidth(70)
+            row2.addWidget(lbl2)
+            self._img_target_kb = QSpinBox()
+            self._img_target_kb.setRange(0, 999999)
+            self._img_target_kb.setValue(0)
+            self._img_target_kb.setSuffix(' KB')
+            self._img_target_kb.setSpecialValueText('不限制')
+            self._img_target_kb.setMinimumHeight(36)
+            self._img_target_kb.setToolTip('0=用质量模式，>0=按目标大小二分法迭代')
+            row2.addWidget(self._img_target_kb)
+            row2.addStretch()
+            layout.addLayout(row2)
+
+        elif tool_key == 'resize_image':
+            layout.setContentsMargins(0, 0, 0, 0)
+            row1 = QHBoxLayout()
+            row1.setSpacing(12)
+            lbl = QLabel('缩放模式')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row1.addWidget(lbl)
+            self._resize_mode = QComboBox()
+            self._resize_mode.setMinimumHeight(36)
+            self._resize_mode.addItems(['按百分比', '按最大边长', '指定宽高'])
+            self._resize_mode.currentIndexChanged.connect(self._on_resize_mode_changed)
+            row1.addWidget(self._resize_mode)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            # 百分比
+            self._resize_pct_row = QHBoxLayout()
+            self._resize_pct_row.setSpacing(12)
+            spacer = QLabel('')
+            spacer.setFixedWidth(70)
+            self._resize_pct_row.addWidget(spacer)
+            self._resize_pct = QSpinBox()
+            self._resize_pct.setRange(1, 1000)
+            self._resize_pct.setValue(50)
+            self._resize_pct.setSuffix('%')
+            self._resize_pct.setMinimumHeight(36)
+            self._resize_pct_row.addWidget(self._resize_pct)
+            self._resize_pct_row.addStretch()
+            layout.addLayout(self._resize_pct_row)
+
+            # 最大边长
+            self._resize_max_row = QHBoxLayout()
+            self._resize_max_row.setSpacing(12)
+            spacer2 = QLabel('')
+            spacer2.setFixedWidth(70)
+            self._resize_max_row.addWidget(spacer2)
+            self._resize_max_dim = QSpinBox()
+            self._resize_max_dim.setRange(1, 16384)
+            self._resize_max_dim.setValue(1920)
+            self._resize_max_dim.setSuffix(' px')
+            self._resize_max_dim.setMinimumHeight(36)
+            self._resize_max_row.addWidget(self._resize_max_dim)
+            self._resize_max_row.addStretch()
+            layout.addLayout(self._resize_max_row)
+
+            # 指定宽高
+            self._resize_wh_row = QHBoxLayout()
+            self._resize_wh_row.setSpacing(12)
+            spacer3 = QLabel('')
+            spacer3.setFixedWidth(70)
+            self._resize_wh_row.addWidget(spacer3)
+            self._resize_w = QSpinBox()
+            self._resize_w.setRange(1, 16384)
+            self._resize_w.setValue(800)
+            self._resize_w.setPrefix('宽 ')
+            self._resize_w.setMinimumHeight(36)
+            self._resize_wh_row.addWidget(self._resize_w)
+            self._resize_h = QSpinBox()
+            self._resize_h.setRange(1, 16384)
+            self._resize_h.setValue(600)
+            self._resize_h.setPrefix('高 ')
+            self._resize_h.setMinimumHeight(36)
+            self._resize_wh_row.addWidget(self._resize_h)
+            self._resize_wh_row.addStretch()
+            layout.addLayout(self._resize_wh_row)
+
+            # 初始显示
+            self._on_resize_mode_changed(0)
+
+        elif tool_key == 'add_watermark':
+            layout.setContentsMargins(0, 0, 0, 0)
+            # 文字水印
+            row1 = QHBoxLayout()
+            row1.setSpacing(12)
+            lbl = QLabel('水印文字')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row1.addWidget(lbl)
+            self._wm_text = QComboBox()
+            self._wm_text.setEditable(True)
+            self._wm_text.setMinimumHeight(36)
+            self._wm_text.setMinimumWidth(250)
+            self._wm_text.addItems(['© 版权所有', 'CONFIDENTIAL', 'DRAFT', 'Sample'])
+            self._wm_text.setCurrentText('© 版权所有')
+            row1.addWidget(self._wm_text)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            row2 = QHBoxLayout()
+            row2.setSpacing(12)
+            lbl2 = QLabel('位置')
+            lbl2.setObjectName('FieldLabel')
+            lbl2.setFixedWidth(70)
+            row2.addWidget(lbl2)
+            self._wm_position = QComboBox()
+            self._wm_position.setMinimumHeight(36)
+            self._wm_position.addItems(['右下角', '左下角', '右上角', '左上角', '居中'])
+            self._wm_position.setItemData(0, 'bottom-right')
+            self._wm_position.setItemData(1, 'bottom-left')
+            self._wm_position.setItemData(2, 'top-right')
+            self._wm_position.setItemData(3, 'top-left')
+            self._wm_position.setItemData(4, 'center')
+            row2.addWidget(self._wm_position)
+            lbl3 = QLabel('透明度')
+            lbl3.setObjectName('FieldLabel')
+            row2.addWidget(lbl3)
+            self._wm_opacity = QSpinBox()
+            self._wm_opacity.setRange(10, 100)
+            self._wm_opacity.setValue(50)
+            self._wm_opacity.setSuffix('%')
+            self._wm_opacity.setMinimumHeight(36)
+            row2.addWidget(self._wm_opacity)
+            lbl4 = QLabel('字号')
+            lbl4.setObjectName('FieldLabel')
+            row2.addWidget(lbl4)
+            self._wm_font_size = QSpinBox()
+            self._wm_font_size.setRange(8, 200)
+            self._wm_font_size.setValue(24)
+            self._wm_font_size.setMinimumHeight(36)
+            row2.addWidget(self._wm_font_size)
+            row2.addStretch()
+            layout.addLayout(row2)
+
+        elif tool_key == 'merge_pdfs':
+            hint = QLabel('添加多个 PDF 文件，按添加顺序合并为一个。')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        elif tool_key == 'split_pdf':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('每文件页数')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._split_pages = QSpinBox()
+            self._split_pages.setRange(1, 9999)
+            self._split_pages.setValue(1)
+            self._split_pages.setMinimumHeight(36)
+            self._split_pages.setToolTip('每个输出文件包含的页数')
+            row.addWidget(self._split_pages)
+            row.addStretch()
+            layout.addLayout(row)
+
+        elif tool_key == 'pdf_to_images':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('输出格式')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._pdf2img_fmt = QComboBox()
+            self._pdf2img_fmt.setMinimumHeight(36)
+            self._pdf2img_fmt.addItems(['PNG', 'JPEG'])
+            self._pdf2img_fmt.setItemData(0, 'png')
+            self._pdf2img_fmt.setItemData(1, 'jpg')
+            row.addWidget(self._pdf2img_fmt)
+            lbl2 = QLabel('DPI')
+            lbl2.setObjectName('FieldLabel')
+            row.addWidget(lbl2)
+            self._pdf2img_dpi = QSpinBox()
+            self._pdf2img_dpi.setRange(72, 600)
+            self._pdf2img_dpi.setValue(200)
+            self._pdf2img_dpi.setMinimumHeight(36)
+            row.addWidget(self._pdf2img_dpi)
+            row.addStretch()
+            layout.addLayout(row)
+
+        elif tool_key == 'images_to_pdf':
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel('页面大小')
+            lbl.setObjectName('FieldLabel')
+            lbl.setFixedWidth(70)
+            row.addWidget(lbl)
+            self._img2pdf_size = QComboBox()
+            self._img2pdf_size.setMinimumHeight(36)
+            self._img2pdf_size.addItems(['自动（图片原始尺寸）', 'A4 页面'])
+            self._img2pdf_size.setItemData(0, 'auto')
+            self._img2pdf_size.setItemData(1, 'a4')
+            row.addWidget(self._img2pdf_size)
+            row.addStretch()
+            layout.addLayout(row)
+
+        else:
+            hint = QLabel(f'工具: {tool_key}')
+            hint.setObjectName('SectionHint')
+            layout.addWidget(hint)
+
+        return page
+
+    def _on_resize_mode_changed(self, idx: int):
+        """切换缩放模式时显示/隐藏对应参数行。"""
+        if not hasattr(self, '_resize_pct_row'):
+            return
+        for i in range(self._resize_pct_row.count()):
+            w = self._resize_pct_row.itemAt(i).widget()
+            if w:
+                w.setVisible(idx == 0)
+        for i in range(self._resize_max_row.count()):
+            w = self._resize_max_row.itemAt(i).widget()
+            if w:
+                w.setVisible(idx == 1)
+        for i in range(self._resize_wh_row.count()):
+            w = self._resize_wh_row.itemAt(i).widget()
+            if w:
+                w.setVisible(idx == 2)
+
+    def _on_cat_changed(self, idx: int):
+        """子类别切换 → 更新工具下拉框。"""
+        if idx < 0 or idx >= len(TOOL_CAT_KEYS):
+            return
+        cat_key = TOOL_CAT_KEYS[idx]
+        self._tool_combo.blockSignals(True)
+        self._tool_combo.clear()
+        for tool_key, tool_name, cat, filt, ext in TOOLS:
+            if cat == cat_key:
+                self._tool_combo.addItem(tool_name, tool_key)
+        self._tool_combo.blockSignals(False)
+        if self._tool_combo.count() > 0:
+            self._on_tool_changed(0)
+
+    def _on_tool_changed(self, idx: int):
+        """工具切换。"""
+        key = self._tool_combo.currentData()
+        if key and key in self._page_map:
+            self._params_stack.setCurrentIndex(self._page_map[key])
+            self._current_tool = key
+            self.tool_changed.emit(key)
+
+    def _browse_subtitle(self):
+        """选择字幕文件。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, '选择字幕文件', '',
+            '字幕文件 (*.srt *.ass *.ssa);;所有文件 (*.*)',
+        )
+        if path:
+            self._subtitle_path = path
+            self._sub_path_label.setText(os.path.basename(path))
+
+    def get_tool_key(self) -> str:
+        """获取当前工具 key。"""
+        return self._current_tool
+
+    def get_tool_params(self) -> dict:
+        """获取当前工具参数。"""
+        tool = self._current_tool
+        params = {}
+        if tool == 'embed_subtitle':
+            params['subtitle_path'] = self._subtitle_path
+            params['language'] = self._lang_combo.currentData()
+        elif tool == 'extract_audio':
+            params['format'] = self._extract_audio_fmt.currentData()
+        elif tool == 'crop_video':
+            params['width'] = self._crop_w.value()
+            params['height'] = self._crop_h.value()
+            params['x'] = self._crop_x.value()
+            params['y'] = self._crop_y.value()
+        elif tool == 'trim_media':
+            params['start_time'] = self._trim_start.currentText().strip()
+            params['end_time'] = self._trim_end.currentText().strip()
+        elif tool == 'compress_video':
+            params['crf'] = self._compress_crf.value()
+            params['scale_width'] = self._compress_scale.value()
+            params['target_size_mb'] = self._compress_target_mb.value()
+        elif tool == 'video_to_gif':
+            params['fps'] = self._gif_fps.value()
+            params['width'] = self._gif_width.value()
+            params['colors'] = self._gif_colors.value()
+        elif tool == 'media_info':
+            pass
+        elif tool == 'compress_image':
+            params['quality'] = self._img_quality.value()
+            params['target_size_kb'] = self._img_target_kb.value()
+        elif tool == 'resize_image':
+            mode = self._resize_mode.currentIndex()
+            if mode == 0:
+                params['percentage'] = self._resize_pct.value()
+            elif mode == 1:
+                params['max_dimension'] = self._resize_max_dim.value()
+            else:
+                params['width'] = self._resize_w.value()
+                params['height'] = self._resize_h.value()
+        elif tool == 'add_watermark':
+            params['text'] = self._wm_text.currentText().strip()
+            params['position'] = self._wm_position.currentData()
+            params['opacity'] = self._wm_opacity.value() / 100.0
+            params['font_size'] = self._wm_font_size.value()
+        elif tool == 'split_pdf':
+            params['pages_per_file'] = self._split_pages.value()
+        elif tool == 'pdf_to_images':
+            params['fmt'] = self._pdf2img_fmt.currentData()
+            params['dpi'] = self._pdf2img_dpi.value()
+        elif tool == 'images_to_pdf':
+            params['page_size'] = self._img2pdf_size.currentData()
+        return params
+
+    def get_file_filter(self) -> str:
+        """获取当前工具的文件过滤器。"""
+        for tool_key, _, _, filt, _ in TOOLS:
+            if tool_key == self._current_tool:
+                return _FILE_FILTERS.get(filt, _FILE_FILTERS['all'])
+        return _FILE_FILTERS['all']
