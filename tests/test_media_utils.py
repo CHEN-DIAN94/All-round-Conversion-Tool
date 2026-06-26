@@ -9,6 +9,7 @@ tests.test_media_utils — 媒体工具函数测试
 """
 
 import os
+import shutil
 import sys
 import threading
 
@@ -73,11 +74,12 @@ class TestGetMediaInfo:
         not os.path.isfile(os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             'bin', 'ffmpeg.exe'
-        )) and not os.system('ffmpeg -version >nul 2>&1') == 0,
+        )) and not shutil.which('ffmpeg'),
         reason='ffmpeg not available'
     )
     def test_with_real_video(self, tmp_path):
         """使用 ffmpeg 生成的测试视频验证 get_media_info"""
+        import subprocess
         ffmpeg = 'ffmpeg'
         # 尝试使用项目 bin 目录的 ffmpeg
         bin_ffmpeg = os.path.join(
@@ -88,9 +90,13 @@ class TestGetMediaInfo:
             ffmpeg = bin_ffmpeg
 
         test_video = tmp_path / 'test.mp4'
-        os.system(f'{ffmpeg} -y -f lavfi -i testsrc=duration=1:size=320x240:rate=25 '
-                  f'-f lavfi -i sine=frequency=440:duration=1 '
-                  f'-c:v libx264 -c:a aac {str(test_video)} 2>/dev/null')
+        subprocess.run(
+            [ffmpeg, '-y', '-f', 'lavfi', '-i',
+             'testsrc=duration=1:size=320x240:rate=25',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+             '-c:v', 'libx264', '-c:a', 'aac', str(test_video)],
+            capture_output=True, timeout=30,
+        )
 
         if not test_video.exists():
             pytest.skip('ffmpeg could not create test video')

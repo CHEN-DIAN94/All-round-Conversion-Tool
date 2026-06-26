@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-🔥 温暖主题动画模块
-- 主按钮温暖呼吸光晕（琥珀 shadow 呼吸）
-- 空状态区域萤火虫粒子
-- 轻量级：idle 时 CPU < 2%
+🔥 温暖主题动画模块（内存泄漏修复版）
+
+修复点同 cute_anim.py：
+1. eventFilter 替代 paintEvent 猴子补丁
+2. stop() 显式 disconnect + deleteLater
+3. 原地过滤粒子列表
+4. __del__ 兜底
 """
 
 import math
 import random
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QObject, QEvent
 from PyQt6.QtGui import QColor, QPainter, QFont, QGraphicsDropShadowEffect
+from PyQt6.QtWidgets import QWidget
 
 
 class _Firefly:
@@ -46,6 +50,20 @@ class _Firefly:
         return int(fade * glow * 200)
 
 
+class _PaintFilter(QObject):
+    """事件过滤器：替代 paintEvent 猴子补丁。"""
+
+    def __init__(self, animator, parent: QWidget):
+        super().__init__(parent)
+        self._animator = animator
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Paint:
+            self._animator._draw_fireflies_on(obj)
+            return False
+        return super().eventFilter(obj, event)
+
+
 class ThemeAnimator:
     def __init__(self, window):
         self._window = window
@@ -56,7 +74,8 @@ class ThemeAnimator:
         self._shadow = None
         self._fireflies: list[_Firefly] = []
         self._empty_widget = None
-        self._original_paint = None
+        self._paint_filter = None
+        self._alive = True
 
     def start(self):
         """启动动画。"""
@@ -69,32 +88,53 @@ class ThemeAnimator:
             self._shadow.setOffset(0, 0)
             btn.setGraphicsEffect(self._shadow)
 
-        # 在空状态 widget 上安装萤火虫绘制
+        # 用 eventFilter 安装萤火虫绘制
         self._empty_widget = getattr(self._window, '_empty_state_widget', None)
         if self._empty_widget:
-            self._original_paint = self._empty_widget.paintEvent
-            self._empty_widget.paintEvent = self._paint_fireflies
+            self._paint_filter = _PaintFilter(self, self._empty_widget)
+            self._empty_widget.installEventFilter(self._paint_filter)
 
         self._timer.start()
 
     def stop(self):
-        """停止动画并清理。"""
+        """停止动画并彻底清理。"""
+        if not self._alive:
+            return
+        self._alive = False
+
         self._timer.stop()
+        try:
+            self._timer.timeout.disconnect(self._tick)
+        except TypeError:
+            pass
+
         btn = getattr(self._window, '_start_btn', None)
         if btn:
             btn.setGraphicsEffect(None)
         self._shadow = None
-        self._fireflies.clear()
 
-        # 恢复原始 paintEvent
-        if self._empty_widget and self._original_paint:
-            self._empty_widget.paintEvent = self._original_paint
-            self._empty_widget.update()
+        if self._empty_widget and self._paint_filter:
+            self._empty_widget.removeEventFilter(self._paint_filter)
+            self._paint_filter.deleteLater()
+            self._paint_filter = None
+
+        self._fireflies.clear()
+        w = self._empty_widget
         self._empty_widget = None
-        self._original_paint = None
+        if w:
+            w.update()
+
+    def __del__(self):
+        """兜底清理。"""
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     def _tick(self):
         """每帧更新。"""
+        if not self._alive:
+            return
         self._phase += 0.05
 
         # 温暖呼吸光晕
@@ -114,23 +154,22 @@ class ThemeAnimator:
                     random.randint(h // 3, max(h // 3, h - 20))
                 ))
 
-        # 更新萤火虫
-        self._fireflies = [f for f in self._fireflies if f.update()]
+        # 原地过滤
+        i = len(self._fireflies) - 1
+        while i >= 0:
+            if not self._fireflies[i].update():
+                del self._fireflies[i]
+            i -= 1
 
-        # 触发重绘
         if self._empty_widget and self._empty_widget.isVisible():
             self._empty_widget.update()
 
-    def _paint_fireflies(self, event):
-        """在空状态 widget 上绘制萤火虫。"""
-        # 先调用原始绘制
-        if self._original_paint:
-            self._original_paint(event)
-
-        if not self._fireflies:
+    def _draw_fireflies_on(self, widget):
+        """在 widget 上绘制萤火虫。"""
+        if not self._alive or not self._fireflies:
             return
 
-        painter = QPainter(self._empty_widget)
+        painter = QPainter(widget)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         for f in self._fireflies:

@@ -32,6 +32,10 @@ def main():
     parser.add_argument('--audio-format', default='mp3', help='提取音频的格式（默认 mp3）')
     parser.add_argument('--trim', nargs=3, metavar=('INPUT', 'START', 'END'),
                         help='裁剪媒体（INPUT START END，如 video.mp4 00:01:00 00:02:00）')
+    parser.add_argument('--pdf-to-docx', help='PDF 转 Word（输入路径）')
+    parser.add_argument('--docx-to-pdf', help='Word 转 PDF（输入路径）')
+    parser.add_argument('--excel-to-image', help='Excel 转图片（输入路径）')
+    parser.add_argument('--pdf-info', help='显示 PDF 信息（输入路径）')
     parser.add_argument('--merge-pdf', nargs='+', help='合并多个 PDF')
     parser.add_argument('--split-pdf', help='拆分 PDF（输入路径）')
     parser.add_argument('--pages-per-file', type=int, default=1, help='拆分时每个文件的页数')
@@ -113,6 +117,38 @@ def main():
         output = args.output or _add_suffix(inp, '_trimmed')
         result = trim_media(inp, output, start, end)
         print(f'✅ 裁剪完成: {result}')
+        return
+
+    # PDF 转 Word
+    if args.pdf_to_docx:
+        from engines import convert_pdf_to_docx
+        output = args.output or _change_ext(args.pdf_to_docx, '.docx')
+        result = convert_pdf_to_docx(args.pdf_to_docx, output)
+        print(f'✅ PDF 转 Word 完成: {result}')
+        return
+
+    # Word 转 PDF
+    if args.docx_to_pdf:
+        from engines import convert_docx_to_pdf
+        output = args.output or _change_ext(args.docx_to_pdf, '.pdf')
+        result = convert_docx_to_pdf(args.docx_to_pdf, output)
+        print(f'✅ Word 转 PDF 完成: {result}')
+        return
+
+    # Excel 转图片
+    if args.excel_to_image:
+        from engines import convert_excel_to_image
+        output = args.output or _change_ext(args.excel_to_image, '.png')
+        result = convert_excel_to_image(args.excel_to_image, output)
+        print(f'✅ Excel 转图片完成: {result}')
+        return
+
+    # PDF 信息
+    if args.pdf_info:
+        from engines import get_pdf_info
+        info = get_pdf_info(args.pdf_info)
+        for k, v in info.items():
+            print(f'  {k}: {v}')
         return
 
     # 合并 PDF

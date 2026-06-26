@@ -53,6 +53,8 @@ class HistoryManager:
         success: bool,
         error: str = '',
         params: Optional[dict] = None,
+        ffmpeg_cmd: str = '',
+        duration_ms: int = 0,
     ) -> None:
         """添加一条历史记录。"""
         with self._lock:
@@ -64,6 +66,8 @@ class HistoryManager:
                 'success': success,
                 'error': error,
                 'params': params or {},
+                'ffmpeg_cmd': ffmpeg_cmd,
+                'duration_ms': duration_ms,
             }
             self._records.append(record)
             # 超限截断
@@ -117,6 +121,10 @@ class HistoryManager:
                 lines.append(f'- 输出: `{r.get("output", "")}`')
                 if r.get('error'):
                     lines.append(f'- 错误: {r["error"]}')
+                if r.get('duration_ms'):
+                    lines.append(f'- 耗时: {r["duration_ms"]}ms')
+                if r.get('ffmpeg_cmd'):
+                    lines.append(f'- FFmpeg 命令: `{r["ffmpeg_cmd"]}`')
                 lines.append('')
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

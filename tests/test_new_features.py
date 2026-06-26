@@ -1,5 +1,7 @@
 """
-tests/test_video_compress.py — 视频压缩引擎测试
+tests/test_new_features.py — 新功能测试
+
+覆盖：video_compress, image_resize, pdf_convert, ffmpeg_utils
 """
 
 import pytest
@@ -118,8 +120,89 @@ class TestPdfConvert:
     def test_pdf_to_images_no_poppler(self):
         from engines.pdf_convert import pdf_to_images, _PDF2IMAGE_AVAILABLE
         if not _PDF2IMAGE_AVAILABLE:
-            with pytest.raises(RuntimeError, match='poppler'):
-                pdf_to_images('/tmp/test.pdf', '/tmp/out')
+            # 创建临时文件避免 FileNotFoundError 先于 RuntimeError
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+                tmp = f.name
+            try:
+                with pytest.raises(RuntimeError, match='poppler'):
+                    pdf_to_images(tmp, '/tmp/out')
+            finally:
+                os.unlink(tmp)
+
+
+class TestToolPanel:
+    """工具面板测试。"""
+
+    def test_tool_keys(self):
+        from widgets import TOOL_KEYS, TOOL_BY_KEY
+        assert len(TOOL_KEYS) == 17
+        # 原有 5 个
+        assert 'export_cmd' in TOOL_KEYS
+        assert 'embed_subtitle' in TOOL_KEYS
+        assert 'extract_subtitle' in TOOL_KEYS
+        assert 'merge_media' in TOOL_KEYS
+        assert 'crop_video' in TOOL_KEYS
+        # 新增视频工具
+        assert 'extract_audio' in TOOL_KEYS
+        assert 'trim_media' in TOOL_KEYS
+        assert 'compress_video' in TOOL_KEYS
+        assert 'video_to_gif' in TOOL_KEYS
+        assert 'media_info' in TOOL_KEYS
+        # 图片工具
+        assert 'compress_image' in TOOL_KEYS
+        assert 'resize_image' in TOOL_KEYS
+        assert 'add_watermark' in TOOL_KEYS
+        # 文档工具
+        assert 'merge_pdfs' in TOOL_KEYS
+        assert 'split_pdf' in TOOL_KEYS
+        assert 'pdf_to_images' in TOOL_KEYS
+        assert 'images_to_pdf' in TOOL_KEYS
+
+    def test_tool_by_key(self):
+        from widgets import TOOL_BY_KEY
+        # TOOL_BY_KEY[key] = (key, display_name, cat, file_filter, output_ext)
+        assert TOOL_BY_KEY['export_cmd'][1] == '导出 FFmpeg 命令'
+        assert TOOL_BY_KEY['crop_video'][1] == '画面裁剪'
+
+    def test_category_keys_has_tools(self):
+        from formats import CATEGORY_KEYS
+        assert 'tools' in CATEGORY_KEYS
+
+
+class TestFFmpegUtilsImports:
+    """ffmpeg_utils 引擎导入测试。"""
+
+    def test_export_ffmpeg_cmd(self):
+        from engines.ffmpeg_utils import export_ffmpeg_cmd
+        assert callable(export_ffmpeg_cmd)
+
+    def test_embed_subtitle(self):
+        from engines.ffmpeg_utils import embed_subtitle
+        assert callable(embed_subtitle)
+
+    def test_extract_subtitle(self):
+        from engines.ffmpeg_utils import extract_subtitle
+        assert callable(extract_subtitle)
+
+    def test_merge_media(self):
+        from engines.ffmpeg_utils import merge_media
+        assert callable(merge_media)
+
+    def test_crop_video(self):
+        from engines.ffmpeg_utils import crop_video
+        assert callable(crop_video)
+
+    def test_merge_media_needs_two_files(self):
+        from engines.ffmpeg_utils import merge_media
+        with pytest.raises(ValueError, match='至少需要 2 个文件'):
+            merge_media(['/tmp/only_one.mp4'], '/tmp/out.mp4')
+
+    def test_crop_video_invalid_size(self):
+        from engines.ffmpeg_utils import crop_video
+        # 文件不存在会先报 FileNotFoundError
+        with pytest.raises(FileNotFoundError):
+            crop_video('/tmp/in.mp4', '/tmp/out.mp4', width=0, height=100)
 
 
 if __name__ == '__main__':

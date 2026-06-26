@@ -72,9 +72,9 @@ def resize_image(
         if progress_callback:
             progress_callback(50)
 
-        # 保存
+        # 保存（BUG-001 修复：_get_save_kwargs 可能返回新 img 以处理透明通道）
         output_ext = Path(output_path).suffix.lower()
-        save_kwargs = _get_save_kwargs(output_ext, quality, img)
+        save_kwargs, img = _get_save_kwargs(output_ext, quality, img)
         img.save(temp_path, **save_kwargs)
 
     finally:
@@ -112,13 +112,15 @@ def _calc_size(orig_w, orig_h, width, height, percentage, max_dimension):
 
 
 def _get_save_kwargs(ext, quality, img):
-    """根据格式返回保存参数。"""
+    """根据格式返回保存参数。返回 (kwargs, img) 二元组，JPEG 时可能替换 img 以处理透明通道。"""
     kwargs = {}
     if ext in ('.jpg', '.jpeg'):
         kwargs['quality'] = quality
         kwargs['optimize'] = True
+        # BUG-001 修复：P/LA/RGBA 模式保存 JPEG 需要转 RGB，必须传回新 img
         if img.mode in ('RGBA', 'LA', 'P'):
-            bg = __import__('PIL.Image', fromlist=['Image']).Image.new('RGB', img.size, (255, 255, 255))
+            from PIL import Image as _Img
+            bg = _Img.new('RGB', img.size, (255, 255, 255))
             if img.mode == 'P':
                 img = img.convert('RGBA')
             bg.paste(img, mask=img.split()[-1])
@@ -129,4 +131,4 @@ def _get_save_kwargs(ext, quality, img):
         kwargs['optimize'] = True
     elif ext in ('.tiff', '.tif'):
         kwargs['compression'] = 'tiff_lzw'
-    return kwargs
+    return kwargs, img

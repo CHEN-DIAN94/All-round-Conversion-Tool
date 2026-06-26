@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-💖 可爱主题动画模块
-- 主按钮柔和呼吸光晕（粉色 shadow 呼吸）
-- 空状态区域飘浮心形/星星粒子
-- 轻量级：idle 时 CPU < 2%
+💖 可爱主题动画模块（内存泄漏修复版）
+
+修复点：
+1. eventFilter 替代 paintEvent 猴子补丁，消除引用环
+2. stop() 显式 disconnect + deleteLater 释放 C++ 对象
+3. 原地过滤粒子列表，减少 GC 压力
+4. __del__ 兜底清理
 """
 
 import math
 import random
-from PyQt6.QtCore import QTimer, QPointF
+from PyQt6.QtCore import QTimer, QObject, QEvent
 from PyQt6.QtGui import QColor, QPainter, QFont, QGraphicsDropShadowEffect
+from PyQt6.QtWidgets import QWidget
 
 
 class _Particle:
@@ -43,6 +47,26 @@ class _Particle:
         return 180
 
 
+class _PaintFilter(QObject):
+    """
+    事件过滤器：替代 paintEvent 猴子补丁。
+
+    通过 installEventFilter 安装，不修改 widget 的 paintEvent 属性，
+    避免 widget → bound method → animator → widget 引用环。
+    """
+
+    def __init__(self, animator, parent: QWidget):
+        super().__init__(parent)
+        self._animator = animator
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Paint:
+            # 让 Qt 先完成默认绘制，再叠加粒子
+            self._animator._draw_particles_on(obj)
+            return False  # 不拦截，让 Qt 继续处理
+        return super().eventFilter(obj, event)
+
+
 class ThemeAnimator:
     def __init__(self, window):
         self._window = window
@@ -53,7 +77,8 @@ class ThemeAnimator:
         self._shadow = None
         self._particles: list[_Particle] = []
         self._empty_widget = None
-        self._original_paint = None
+        self._paint_filter = None
+        self._alive = True
 
     def start(self):
         """启动动画。"""
@@ -66,32 +91,59 @@ class ThemeAnimator:
             self._shadow.setOffset(0, 0)
             btn.setGraphicsEffect(self._shadow)
 
-        # 在空状态 widget 上安装粒子绘制
+        # 用 eventFilter 安装粒子绘制（不修改 paintEvent）
         self._empty_widget = getattr(self._window, '_empty_state_widget', None)
         if self._empty_widget:
-            self._original_paint = self._empty_widget.paintEvent
-            self._empty_widget.paintEvent = self._paint_particles
+            self._paint_filter = _PaintFilter(self, self._empty_widget)
+            self._empty_widget.installEventFilter(self._paint_filter)
 
         self._timer.start()
 
     def stop(self):
-        """停止动画并清理。"""
+        """停止动画并彻底清理所有资源。"""
+        if not self._alive:
+            return
+        self._alive = False
+
+        # 1. 停止并断开 timer 信号
         self._timer.stop()
+        try:
+            self._timer.timeout.disconnect(self._tick)
+        except TypeError:
+            pass  # 已断开
+
+        # 2. 显式释放 shadow effect
         btn = getattr(self._window, '_start_btn', None)
         if btn:
             btn.setGraphicsEffect(None)
         self._shadow = None
-        self._particles.clear()
 
-        # 恢复原始 paintEvent
-        if self._empty_widget and self._original_paint:
-            self._empty_widget.paintEvent = self._original_paint
-            self._empty_widget.update()
+        # 3. 移除事件过滤器并 deleteLater
+        if self._empty_widget and self._paint_filter:
+            self._empty_widget.removeEventFilter(self._paint_filter)
+            self._paint_filter.deleteLater()
+            self._paint_filter = None
+
+        # 4. 清空粒子
+        self._particles.clear()
+        w = self._empty_widget
         self._empty_widget = None
-        self._original_paint = None
+
+        # 5. 触发重绘清除残余
+        if w:
+            w.update()
+
+    def __del__(self):
+        """兜底：外部忘记调用 stop() 时自动清理。"""
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     def _tick(self):
         """每帧更新。"""
+        if not self._alive:
+            return
         self._phase += 0.06
 
         # 呼吸光晕
@@ -111,23 +163,23 @@ class ThemeAnimator:
                     random.randint(h // 2, max(h // 2, h - 20))
                 ))
 
-        # 更新粒子
-        self._particles = [p for p in self._particles if p.update()]
+        # 原地过滤：倒序遍历删除，避免每帧创建新 list
+        i = len(self._particles) - 1
+        while i >= 0:
+            if not self._particles[i].update():
+                del self._particles[i]
+            i -= 1
 
         # 触发重绘
         if self._empty_widget and self._empty_widget.isVisible():
             self._empty_widget.update()
 
-    def _paint_particles(self, event):
-        """在空状态 widget 上绘制粒子。"""
-        # 先调用原始绘制
-        if self._original_paint:
-            self._original_paint(event)
-
-        if not self._particles:
+    def _draw_particles_on(self, widget):
+        """在 widget 上绘制粒子（由事件过滤器调用）。"""
+        if not self._alive or not self._particles:
             return
 
-        painter = QPainter(self._empty_widget)
+        painter = QPainter(widget)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         for p in self._particles:

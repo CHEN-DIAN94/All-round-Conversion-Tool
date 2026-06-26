@@ -23,7 +23,13 @@ __all__ = ['pdf_to_images', 'images_to_pdf']
 _PDF2IMAGE_AVAILABLE = False
 try:
     from pdf2image import convert_from_path
-    _PDF2IMAGE_AVAILABLE = True
+    # 检查 poppler 二进制是否在 PATH 中（仅 import pdf2image 不够）
+    import subprocess as _sp
+    try:
+        _sp.run(['pdftoppm', '-h'], capture_output=True, timeout=5)
+        _PDF2IMAGE_AVAILABLE = True
+    except (FileNotFoundError, _sp.TimeoutExpired):
+        pass
 except ImportError:
     pass
 
@@ -122,6 +128,7 @@ def images_to_pdf(
         # A4 at 72 DPI: 595 x 842 points
         a4_w, a4_h = 595, 842
         resized = []
+        originals = list(images)  # 保存原始引用以便后续关闭
         for img in images:
             # 等比缩放到 A4 范围内
             ratio = min(a4_w / img.width, a4_h / img.height)
@@ -134,7 +141,11 @@ def images_to_pdf(
             offset_y = (a4_h - new_h) // 2
             a4_img.paste(img_resized, (offset_x, offset_y))
             resized.append(a4_img)
+        # BUG-002 修复：关闭原始 img 避免泄漏（save 用的是 resized 列表）
+        for img in originals:
+            img.close()
         images = resized
+        first_image = images[0]  # 更新 first_image 指向 resized
 
     first_image.save(output_path, 'PDF', save_all=True, append_images=images[1:])
 

@@ -34,7 +34,6 @@ dependencies = [
     "pillow-heif>=0.16.0",
     "pypdf>=4.0.0",
     "pdf2image>=1.16.0",
-    "opencv-python-headless>=4.8.0",
 ]
 
 [project.optional-dependencies]

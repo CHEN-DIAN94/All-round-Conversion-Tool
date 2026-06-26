@@ -8,6 +8,7 @@ engines.ffmpeg_utils — FFmpeg 高级工具
 - crop_video: 裁剪视频画面
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -29,6 +30,45 @@ __all__ = [
     'export_ffmpeg_cmd', 'embed_subtitle', 'extract_subtitle',
     'merge_media', 'crop_video',
 ]
+
+
+def _probe_video_info(input_path: str) -> dict:
+    """
+    用 ffprobe 探测视频分辨率/帧率/像素格式。
+
+    Returns:
+        {'width': int, 'height': int, 'fps': float, 'pix_fmt': str}
+        探测失败返回空 dict。
+    """
+    ffprobe = get_ffprobe_path()
+    try:
+        cmd = [
+            ffprobe, '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-select_streams', 'v:0', input_path,
+        ]
+        result = run_subprocess(cmd, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            return {}
+        data = json.loads(result.stdout)
+        streams = data.get('streams', [])
+        if not streams:
+            return {}
+        s = streams[0]
+        fps = 0.0
+        rfr = s.get('r_frame_rate', '0/1')
+        if '/' in rfr:
+            num, den = rfr.split('/')
+            fps = float(num) / float(den) if float(den) else 0.0
+        else:
+            fps = float(rfr)
+        return {
+            'width': int(s.get('width', 0)),
+            'height': int(s.get('height', 0)),
+            'fps': fps,
+            'pix_fmt': s.get('pix_fmt', 'yuv420p'),
+        }
+    except Exception:
+        return {}
 
 
 def export_ffmpeg_cmd(
@@ -105,12 +145,20 @@ def embed_subtitle(
     sub_ext = Path(subtitle_path).suffix.lower()
     if sub_ext in ('.srt', '.ass', '.ssa'):
         # 软字幕：视频不重编码
+        # [RISK-07 修复] 按字幕格式 + 容器类型选择 codec
+        out_ext = Path(output_path).suffix.lower()
+        if out_ext in ('.mp4', '.m4v'):
+            sub_codec = 'mov_text'
+        elif sub_ext in ('.ass', '.ssa'):
+            sub_codec = 'ass'
+        else:
+            sub_codec = 'srt'
         cmd = [
             ffmpeg, '-y',
             '-i', input_path,
             '-i', subtitle_path,
             '-c', 'copy',
-            '-c:s', 'mov_text' if Path(output_path).suffix.lower() in ('.mp4', '.m4v') else 'srt',
+            '-c:s', sub_codec,
             '-map', '0', '-map', '1',
             '-metadata:s:s:0', f'language={language}',
             temp_path,
@@ -141,8 +189,8 @@ def extract_subtitle(
         raise FileNotFoundError(f'输入文件不存在: {input_path}')
 
     ffmpeg = get_ffmpeg_path()
-    ensure_output_dir = __import__('utils', fromlist=['ensure_output_dir']).ensure_output_dir
-    ensure_output_dir(output_path)
+    from utils import ensure_output_dir as _ensure_dir
+    _ensure_dir(output_path)
 
     cmd = [
         ffmpeg, '-y',
@@ -195,6 +243,18 @@ def merge_media(
     ffmpeg = get_ffmpeg_path()
     temp_path = _prepare_output(output_path, min_free_mb=200)
 
+    # [MERGE-04/05/06 修复] 探测所有输入，判断是否需要重编码
+    all_info = [_probe_video_info(p) for p in input_paths]
+    need_reencode = False
+    if all_info and all_info[0].get('width'):
+        ref = all_info[0]
+        for info in all_info[1:]:
+            if (info.get('width') != ref.get('width') or
+                info.get('height') != ref.get('height') or
+                abs(info.get('fps', 0) - ref.get('fps', 0)) > 0.5):
+                need_reencode = True
+                break
+
     # 创建 concat 文件列表
     concat_file = temp_path.replace('.~tmp', '.~concat')
     try:
@@ -204,15 +264,53 @@ def merge_media(
                 escaped = p.replace("'", "'\\''")
                 f.write(f"file '{escaped}'\n")
 
-        cmd = [
-            ffmpeg, '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', concat_file,
-            '-c', 'copy',
-            '-map_metadata', '0',
-            temp_path,
-        ]
+        if need_reencode:
+            # 异构流：使用 filter_complex 对齐重编码
+            max_w = max(info.get('width', 1920) for info in all_info)
+            max_h = max(info.get('height', 1080) for info in all_info)
+            max_fps = min(max(info.get('fps', 30) for info in all_info), 60.0)
+            max_w = max(2, max_w & ~1)
+            max_h = max(2, max_h & ~1)
+
+            encoders = _get_available_encoders(ffmpeg)
+            from engines.ffmpeg_core import _select_h264_encoder
+            venc = _select_h264_encoder(encoders)
+
+            parts = []
+            for i in range(len(input_paths)):
+                parts.append(
+                    f'[{i}:v]scale={max_w}:{max_h}:force_original_aspect_ratio=decrease,'
+                    f'pad={max_w}:{max_h}:(ow-iw)/2:(oh-ih)/2:black,'
+                    f'fps={max_fps},setsar=1[v{i}]'
+                )
+                parts.append(f'[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}]')
+            cv = ''.join(f'[v{i}]' for i in range(len(input_paths)))
+            ca = ''.join(f'[a{i}]' for i in range(len(input_paths)))
+            parts.append(f'{cv}{ca}concat=n={len(input_paths)}:v=1:a=1[outv][outa]')
+
+            cmd = [ffmpeg, '-y']
+            for p in input_paths:
+                cmd += ['-i', p]
+            cmd += [
+                '-filter_complex', ';'.join(parts),
+                '-map', '[outv]', '-map', '[outa]',
+                '-c:v', venc, '-c:a', 'aac', '-b:a', '192k',
+                '-map_metadata', '0', temp_path,
+            ]
+            if venc == 'libx264':
+                cmd.insert(-1, '-pix_fmt')
+                cmd.insert(-1, 'yuv420p')
+        else:
+            # 同构流：快速 concat 拷贝
+            cmd = [
+                ffmpeg, '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_file,
+                '-c', 'copy',
+                '-map_metadata', '0',
+                temp_path,
+            ]
 
         return _run_ffmpeg_utils(cmd, temp_path, output_path, '合并', proc_ref, progress_callback, cancel_event)
 
@@ -256,10 +354,25 @@ def crop_video(
         raise FileNotFoundError(f'输入文件不存在: {input_path}')
     if width <= 0 or height <= 0:
         raise ValueError(f'裁剪尺寸必须为正数: {width}x{height}')
+    # [RISK-01 修复] 负坐标校验
+    if x < 0 or y < 0:
+        raise ValueError(f'裁剪坐标不能为负数: ({x}, {y})')
 
     ffmpeg = get_ffmpeg_path()
     input_size_mb = os.path.getsize(input_path) / (1024 * 1024)
     temp_path = _prepare_output(output_path, min_free_mb=max(int(input_size_mb * 2), 100))
+
+    # [CROP-03/04/08 修复] 探测源分辨率并箝位裁剪参数
+    info = _probe_video_info(input_path)
+    src_w = info.get('width', 0)
+    src_h = info.get('height', 0)
+    if src_w > 0 and src_h > 0:
+        width = min(width, src_w)        # CROP-03: 裁剪宽高不超过源尺寸
+        height = min(height, src_h)
+        x = max(0, min(x, src_w - width))  # CROP-04: 起始坐标不越界
+        y = max(0, min(y, src_h - height))
+        width = max(2, width & ~1)        # CROP-08: H.264 要求偶数尺寸
+        height = max(2, height & ~1)
 
     encoders = _get_available_encoders(ffmpeg)
     from engines.ffmpeg_core import _select_h264_encoder
@@ -303,7 +416,3 @@ def _run_ffmpeg_utils(cmd, temp_path, output_path, error_prefix, proc_ref, progr
     finalize_file(temp_path, output_path)
     return output_path
 
-
-def ensure_output_dir(path: str):
-    """确保输出目录存在。"""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)

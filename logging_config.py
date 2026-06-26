@@ -8,7 +8,6 @@ logging_config.py — 全局日志配置
 """
 
 import logging
-import os
 import sys
 from datetime import datetime
 from pathlib import Path

@@ -18,6 +18,7 @@ THEMES = {
     'starfield': ('🌌 星空', 'starfield.qss', '深蓝紫渐变 · 星光粒子 · 蓝紫高光', None),
     'cyberpunk': ('🌃 赛博朋克', 'cyberpunk.qss', '纯黑底 · 青蓝/品红霓虹 · 锐利直角', None),
     'minimal':   ('⬜ 极简白', 'minimal.qss', '纯白底 · 蓝色主色 · macOS 风格', None),
+    'dark':      ('🌙 深色', 'dark.qss', '深灰底 · 蓝色主色 · 柔和护眼', None),
     'cute':      ('💖 可爱', 'cute.qss', '粉紫渐变 · 圆润气泡 · 彩虹微光动画', 'cute_anim'),
     'warm':      ('🔥 温暖', 'warm.qss', '琥珀暖橙 · 柔和光晕 · 萤火虫动画', 'warm_anim'),
 }
@@ -87,11 +88,11 @@ def activate_animation(theme_key: str, window) -> None:
 
 
 def stop_current_animation() -> None:
-    """停止当前活跃的动画。"""
+    """停止当前活跃的动画。释放全局引用，让 GC 回收。"""
     global _current_animator
     if _current_animator is not None:
         try:
             _current_animator.stop()
         except Exception:
             pass
-        _current_animator = None
+        _current_animator = None  # 释放引用，触发 animator.__del__

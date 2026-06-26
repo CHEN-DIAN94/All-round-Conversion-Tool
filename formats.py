@@ -5,7 +5,7 @@ formats.py — 格式定义、映射表和文件辅助函数
 """
 
 
-__all__ = ['CATEGORY_KEYS', 'FORMAT_BY_KEY', 'FORMAT_CATEGORIES', 'CATEGORY_EXTS', 'CONVERSION_MAP', 'COL_FILE_NAME', 'COL_FILE_SIZE', 'COL_PROGRESS', 'COL_STATUS', 'COL_COUNT', 'STATUS_COLORS', '_is_legacy_doc', '_collect_files_from_paths', 'map_format_to_category']
+__all__ = ['CATEGORY_KEYS', 'FORMAT_BY_KEY', 'FORMAT_CATEGORIES', 'CATEGORY_EXTS', 'CONVERSION_MAP', 'COL_FILE_NAME', 'COL_FILE_SIZE', 'COL_PROGRESS', 'COL_STATUS', 'COL_COUNT', 'STATUS_COLORS', '_is_legacy_doc', '_collect_files_from_paths']
 
 import os
 
@@ -13,7 +13,7 @@ from constants import MAX_FILES_PER_BATCH, FileStatus
 
 
 # 类别键列表（多处引用，统一定义）
-CATEGORY_KEYS = ['video', 'audio', 'image', 'document', 'spreadsheet']
+CATEGORY_KEYS = ['video', 'audio', 'image', 'document', 'spreadsheet', 'tools']
 
 # 格式映射表：类别 → (显示名称, 格式列表)
 FORMAT_CATEGORIES = [

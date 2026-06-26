@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/PyQt6-6.5+-green?logo=qt" />
   <img src="https://img.shields.io/badge/FFmpeg-6.0+-red?logo=ffmpeg" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" />
-  <img src="https://img.shields.io/badge/Tests-108%20passed-brightgreen" />
+  <img src="https://img.shields.io/badge/Tests-116%20passed-brightgreen" />
 </p>
 
 ---
@@ -38,10 +38,14 @@
 - **PDF ↔ 图片** — PDF 每页导出 / 图片合并为 PDF
 - **音频提取** — 从视频提取音轨
 - **媒体裁剪** — 按时间范围裁剪视频/音频
+- **视频画面裁剪** — 按尺寸/位置裁剪画面区域
+- **音视频合并** — 多个音视频文件合并为一个
+- **字幕嵌入/提取** — 外挂字幕嵌入视频 / 从视频提取字幕
+- **导出 FFmpeg 命令** — 生成命令不执行，方便调试和脚本化
 - **媒体信息** — 查看详细编码/码率/分辨率信息
 
 ### 🎨 主题系统
-5 款精心设计的主题，含 2 个动画主题：
+6 款精心设计的主题，含 2 个动画主题：
 
 | 主题 | 风格 | 动画 |
 |------|------|------|
@@ -50,6 +54,7 @@
 | ⬜ 极简白 | 纯白 macOS 风 | — |
 | 💖 可爱 | 粉紫渐变 | 心形粒子 + 呼吸光晕 |
 | 🔥 温暖 | 琥珀暖橙 | 萤火虫粒子 + 温暖光晕 |
+| 🌑 暗色 | 深色护眼 | — |
 
 ### 📋 其他功能
 - **转换预设** — 内置「微信发送」「剪辑存档」「网页上传」预设
@@ -118,6 +123,14 @@ python cli.py --images-to-pdf a.jpg b.jpg -o output.pdf
 python cli.py --extract-audio input.mp4 --audio-format flac
 python cli.py --trim input.mp4 00:01:00 00:02:30 -o trimmed.mp4
 python cli.py --info input.mp4
+
+# FFmpeg 高级工具
+python cli.py --export-cmd input.mp4 output.webm         # 导出 ffmpeg 命令（不执行）
+python cli.py --embed-sub input.mp4 sub.srt output.mp4    # 嵌入字幕
+python cli.py --embed-sub input.mp4 sub.srt output.mp4 --sub-lang eng  # 指定语言
+python cli.py --extract-sub input.mp4 output.srt          # 提取字幕
+python cli.py --merge a.mp4 b.mp4 c.mp4 -o merged.mp4    # 合并音视频
+python cli.py --crop input.mp4 --crop-size 640 480 --crop-pos 100 50  # 裁剪画面
 ```
 
 ## 📁 项目结构
@@ -126,46 +139,53 @@ python cli.py --info input.mp4
 流光/
 ├── main.py              # GUI 入口
 ├── cli.py               # CLI 入口
-├── ui.py                # 主窗口
+├── ui.py                # 主窗口（Mixin 组合）
+├── ui_file_table.py     # 文件表格管理 Mixin
+├── ui_conversion.py     # 转换控制 Mixin
+├── ui_settings.py       # 设置/主题/布局 Mixin
 ├── widgets.py           # 自定义组件（表格/预览/设置面板）
 ├── formats.py           # 格式定义与映射
-├── utils.py             # 工具函数
-├── workers.py           # 工作线程（QThread）
+├── utils.py             # 工具函数（subprocess 封装）
+├── workers.py           # 工作线程（QThread + BatchOrchestrator）
 ├── constants.py         # 全局常量
-├── presets.py           # 转换预设
-├── history.py           # 转换历史
-├── logging_config.py    # 日志配置
+├── presets.py           # 转换预设管理
+├── history.py           # 转换历史（JSON 持久化）
+├── logging_config.py    # 日志配置（按日轮转）
 ├── engines/
-│   ├── ffmpeg_core.py   # 视频/音频转换
-│   ├── image_engine.py  # 图片转换
-│   ├── document_engine.py # 文档转换
-│   ├── excel_engine.py  # 表格转图片
-│   ├── gif_engine.py    # 视频转 GIF
-│   ├── video_compress.py # 视频压缩
+│   ├── __init__.py      # 引擎注册表（统一导出）
+│   ├── ffmpeg_core.py   # 视频/音频转换 + 进度监控
+│   ├── ffmpeg_utils.py  # FFmpeg 高级工具（导出命令/字幕/合并/裁剪）
+│   ├── image_engine.py  # 图片格式转换
+│   ├── document_engine.py # PDF ↔ DOCX
+│   ├── excel_engine.py  # Excel → 图片
+│   ├── gif_engine.py    # 视频转 GIF（两步法调色板）
+│   ├── video_compress.py # 视频压缩（CRF/目标大小）
 │   ├── compress_engine.py # 图片压缩
-│   ├── image_resize.py  # 图片缩放
-│   ├── watermark_engine.py # 图片水印
-│   ├── pdf_tools.py     # PDF 合并/拆分
+│   ├── image_resize.py  # 图片缩放（4 种模式）
+│   ├── watermark_engine.py # 文字/图片水印
+│   ├── pdf_tools.py     # PDF 合并/拆分/信息
 │   ├── pdf_convert.py   # PDF ↔ 图片
-│   ├── format_handlers.py # 格式特殊处理
-│   ├── codec_compat.py  # 编码兼容性矩阵
-│   └── _common.py       # 共享工具
+│   ├── format_handlers.py # 格式特殊处理（ICO/BMP/GIF/TIFF）
+│   ├── codec_compat.py  # 容器-编码兼容性矩阵
+│   └── _common.py       # 共享工具（磁盘检查/临时路径）
 ├── themes/
-│   ├── __init__.py      # 主题注册表
+│   ├── __init__.py      # 主题注册表 + 动画生命周期
 │   ├── starfield.qss    # 🌌 星空
 │   ├── cyberpunk.qss    # 🌃 赛博朋克
 │   ├── minimal.qss      # ⬜ 极简白
+│   ├── dark.qss         # 🌑 暗色
 │   ├── cute.qss         # 💖 可爱（动画）
 │   ├── cute_anim.py
 │   ├── warm.qss         # 🔥 温暖（动画）
 │   └── warm_anim.py
 └── tests/
-    ├── test_codec_compat.py
-    ├── test_format_handlers.py
-    ├── test_media_utils.py
-    ├── test_presets.py
-    ├── test_new_engines.py
-    └── test_new_features.py
+    ├── test_codec_compat.py    # 容器兼容性测试
+    ├── test_format_handlers.py # 格式处理器测试
+    ├── test_media_utils.py     # 媒体工具测试
+    ├── test_presets.py         # 预设管理测试
+    ├── test_new_engines.py     # 新引擎测试（历史/压缩/水印/PDF）
+    ├── test_new_features.py    # 新功能测试（视频压缩/缩放/PDF转换）
+    └── QA_TEST_DESIGN.md       # 104 场景测试设计文档
 ```
 
 ## 🧪 测试

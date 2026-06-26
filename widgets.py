@@ -10,7 +10,7 @@ widgets.py — 自定义 PyQt6 Widget
 """
 
 
-__all__ = ['DropableTableWidget', 'StatusColorDelegate', 'ErrorDetailDialog', 'AdvancedSettingsPanel', 'PreviewPanel']
+__all__ = ['DropableTableWidget', 'StatusColorDelegate', 'ErrorDetailDialog', 'AdvancedSettingsPanel', 'PreviewPanel', 'ToolPanel', 'HistoryDialog', 'PresetCombo']
 
 import os
 import subprocess
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QApplication, QLabel, QWidget,
     QGroupBox, QFormLayout, QSpinBox, QComboBox,
     QCheckBox, QSlider, QSizePolicy,
+    QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
 )
 
 from formats import STATUS_COLORS, _collect_files_from_paths
@@ -68,16 +69,44 @@ class DropableTableWidget(QTableWidget):
 # ==============================================================
 
 class StatusColorDelegate(QStyledItemDelegate):
-    """为状态列绘制彩色文本。"""
+    """
+    为状态列绘制彩色文本（主题感知）。
+
+    深色模式下使用高对比度颜色（WCAG AA ≥ 4.5:1），
+    避免状态文字在深色背景上不可见。
+    """
+
+    # 深色模式下的状态颜色映射（对比度 ≥ 4.5:1 on #2a2a3e）
+    _DARK_STATUS_COLORS = {
+        '等待中':  '#94a3b8',
+        '转换中':  '#38bdf8',
+        '成功':    '#4ade80',
+        '失败':    '#f87171',
+        '已取消':  '#fbbf24',
+    }
+
+    @staticmethod
+    def _is_dark_theme() -> bool:
+        """检测当前是否为深色主题（通过 palette 背景色亮度判断）。"""
+        from PyQt6.QtWidgets import QApplication
+        bg = QApplication.palette().window().color()
+        return (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000 < 128
 
     def paint(self, painter: QPainter, option, index) -> None:
         text = index.data(Qt.ItemDataRole.DisplayRole) or ''
-        color = STATUS_COLORS.get(text, '#1F1F1F')
+
+        # 根据主题选择颜色映射
+        if self._is_dark_theme():
+            color = self._DARK_STATUS_COLORS.get(text, '#a0a0c0')
+            selected_bg = QColor('#3a3a5e')
+        else:
+            color = STATUS_COLORS.get(text, '#1F1F1F')
+            selected_bg = QColor('#E5F1FB')
 
         painter.save()
         # 选中态背景
         if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(option.rect, QColor('#E5F1FB'))
+            painter.fillRect(option.rect, selected_bg)
 
         painter.setPen(QColor(color))
         font = painter.font()
@@ -510,3 +539,264 @@ class PreviewPanel(QWidget):
                 return f'{size_bytes:.1f} {unit}'
             size_bytes /= 1024
         return f'{size_bytes:.1f} TB'
+
+
+# ==============================================================
+# HistoryDialog — 转换历史对话框（含 FFmpeg 命令复制）
+# ==============================================================
+
+class HistoryDialog(QDialog):
+    """转换历史记录对话框。支持搜索、清空、导出、复制 FFmpeg 命令。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('转换历史')
+        self.setMinimumSize(800, 500)
+        self._init_ui()
+        self._load_history()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # 搜索栏
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._search_input = QComboBox()
+        self._search_input.setEditable(True)
+        self._search_input.setMinimumHeight(36)
+        self._search_input.setPlaceholderText('搜索文件名...')
+        self._search_input.currentTextChanged.connect(self._on_search)
+        search_row.addWidget(self._search_input, 1)
+
+        btn_clear = QPushButton('清空历史')
+        btn_clear.setObjectName('DangerButton')
+        btn_clear.setMinimumHeight(36)
+        btn_clear.clicked.connect(self._on_clear)
+        search_row.addWidget(btn_clear)
+
+        btn_export = QPushButton('导出 MD')
+        btn_export.setObjectName('SecondaryButton')
+        btn_export.setMinimumHeight(36)
+        btn_export.clicked.connect(self._on_export)
+        search_row.addWidget(btn_export)
+
+        btn_copy_cmd = QPushButton('📋 复制 FFmpeg 命令')
+        btn_copy_cmd.setObjectName('SecondaryButton')
+        btn_copy_cmd.setMinimumHeight(36)
+        btn_copy_cmd.clicked.connect(self._on_copy_ffmpeg_cmd)
+        search_row.addWidget(btn_copy_cmd)
+
+        layout.addLayout(search_row)
+
+        # 历史列表
+        self._table = QTableWidget()
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(
+            ['时间', '类型', '文件名', '状态', '耗时', '路径'])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.Stretch)
+        self._table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
+        layout.addWidget(self._table, 1)
+
+        # 底部信息
+        self._info_label = QLabel('')
+        self._info_label.setObjectName('SectionHint')
+        layout.addWidget(self._info_label)
+
+    def _load_history(self, records=None):
+        """加载历史记录到表格。"""
+        from history import HistoryManager
+        hm = HistoryManager()
+        if records is None:
+            records = hm.get_recent(200)
+
+        self._records = records  # 缓存用于复制命令
+        self._table.setRowCount(len(records))
+        for i, r in enumerate(records):
+            ts = r.get('timestamp', '')[:19].replace('T', ' ')
+            self._table.setItem(i, 0, QTableWidgetItem(ts))
+            self._table.setItem(i, 1, QTableWidgetItem(r.get('type', '')))
+
+            inp = r.get('input', '')
+            name_item = QTableWidgetItem(os.path.basename(inp))
+            name_item.setToolTip(inp)
+            self._table.setItem(i, 2, name_item)
+
+            status = '✅ 成功' if r.get('success') else '❌ 失败'
+            status_item = QTableWidgetItem(status)
+            if r.get('error'):
+                status_item.setToolTip(r['error'])
+            self._table.setItem(i, 3, status_item)
+
+            # 耗时
+            dur = r.get('duration_ms', 0)
+            if dur > 0:
+                if dur >= 1000:
+                    dur_text = f'{dur / 1000:.1f}s'
+                else:
+                    dur_text = f'{dur}ms'
+            else:
+                dur_text = ''
+            self._table.setItem(i, 4, QTableWidgetItem(dur_text))
+
+            out_item = QTableWidgetItem(r.get('output', ''))
+            out_item.setToolTip(r.get('output', ''))
+            self._table.setItem(i, 5, out_item)
+
+        self._info_label.setText(f'共 {len(records)} 条记录  |  总计 {hm.count} 条')
+
+    def _on_search(self, text):
+        """搜索。"""
+        if not text.strip():
+            self._load_history()
+            return
+        from history import HistoryManager
+        hm = HistoryManager()
+        results = hm.search(text.strip())
+        self._load_history(results)
+
+    def _on_clear(self):
+        """清空历史。"""
+        reply = QMessageBox.question(
+            self, '确认清空',
+            '确定要清空所有转换历史吗？此操作不可撤销。',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from history import HistoryManager
+            hm = HistoryManager()
+            hm.clear()
+            self._load_history()
+
+    def _on_export(self):
+        """导出为 Markdown。"""
+        from history import HistoryManager
+        from datetime import datetime
+        hm = HistoryManager()
+        if hm.count == 0:
+            QMessageBox.information(self, '提示', '没有历史记录。')
+            return
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        path, _ = QFileDialog.getSaveFileName(
+            self, '导出历史', f'转换历史_{ts}.md',
+            'Markdown (*.md);;所有文件 (*..*)',
+        )
+        if path:
+            result = hm.export_markdown(path)
+            QMessageBox.information(self, '导出成功', f'已导出到:\n{result}')
+
+    def _on_copy_ffmpeg_cmd(self):
+        """复制选中记录的 FFmpeg 命令到剪贴板。"""
+        selected = self._table.selectedItems()
+        if not selected:
+            QMessageBox.information(self, '提示', '请先选择一条历史记录。')
+            return
+        row = selected[0].row()
+        if row < len(self._records):
+            cmd = self._records[row].get('ffmpeg_cmd', '')
+            if cmd:
+                QApplication.clipboard().setText(cmd)
+                QMessageBox.information(
+                    self, '已复制',
+                    'FFmpeg 命令已复制到剪贴板。\n\n'
+                    '可以在终端中修改参数后直接运行。')
+            else:
+                QMessageBox.information(
+                    self, '提示',
+                    '该记录没有保存 FFmpeg 命令。\n'
+                    '（仅 v1.2.0 之后的转换记录包含命令日志）')
+
+
+# ==============================================================
+# PresetCombo — 预设选择组件
+# ==============================================================
+
+class PresetCombo(QWidget):
+    """预设选择下拉框，集成 PresetManager。"""
+
+    preset_applied = pyqtSignal(dict)  # 预设应用信号
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._combo = QComboBox()
+        self._combo.setMinimumHeight(36)
+        self._combo.setPlaceholderText('选择预设...')
+        layout.addWidget(self._combo, 1)
+
+        self._btn_save = QPushButton('💾')
+        self._btn_save.setFixedSize(36, 36)
+        self._btn_save.setToolTip('保存当前设置为预设')
+        layout.addWidget(self._btn_save)
+
+        self._btn_delete = QPushButton('🗑')
+        self._btn_delete.setFixedSize(36, 36)
+        self._btn_delete.setToolTip('删除选中预设')
+        layout.addWidget(self._btn_delete)
+
+        self._combo.currentIndexChanged.connect(self._on_selected)
+        self._btn_save.clicked.connect(self._on_save)
+        self._btn_delete.clicked.connect(self._on_delete)
+
+        self._load_presets()
+
+    def _load_presets(self):
+        """加载预设列表。"""
+        from presets import PresetManager
+        self._pm = PresetManager()
+        self._combo.blockSignals(True)
+        self._combo.clear()
+        self._combo.addItem('（无预设）', None)
+        for name, params in self._pm.list_presets().items():
+            desc = params.get('description', '')
+            self._combo.addItem(f'{name} — {desc}', name)
+        self._combo.blockSignals(False)
+
+    def _on_selected(self, idx):
+        """预设被选中。"""
+        name = self._combo.currentData()
+        if name:
+            params = self._pm.get_preset(name)
+            if params:
+                self.preset_applied.emit(params)
+
+    def _on_save(self):
+        """保存当前设置为新预设。"""
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, '保存预设', '预设名称:')
+        if ok and name.strip():
+            # 发送保存请求信号（包含 __save_request__ 标记）
+            self.preset_applied.emit({'__save_request__': name.strip()})
+            self._load_presets()
+
+    def _on_delete(self):
+        """删除选中预设。"""
+        name = self._combo.currentData()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self, '确认删除',
+            f'确定要删除预设 "{name}" 吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._pm.delete_preset(name)
+            self._load_presets()

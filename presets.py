@@ -3,7 +3,8 @@ presets.py — 转换预设管理系统
 
 提供：
 - PresetManager — 管理 JSON 文件中的转换预设
-- 默认预设：微信发送（小体积）、剪辑存档（高质量）、网页上传（网络优化）
+- 默认预设：微信发送、剪辑存档、网页上传
+- 场景预设：Discord、YouTube 上传、iPhone 播放、存档原始、网页嵌入
 - 每个预设映射到 AdvancedSettingsPanel 的参数
 
 预设参数 keys（与 widgets.AdvancedSettingsPanel.DEFAULTS 一致）：
@@ -54,6 +55,56 @@ _DEFAULT_PRESETS = {
         'audio_sample_rate': 44100,
         'image_quality': 85,
         'image_resize': 100,
+    },
+    # ---- 场景预设（对标 HandBrake 设备预设） ----
+    'Discord': {
+        'description': '50MB 以内，Discord 文件上传限制',
+        'video_crf': 23,
+        'video_preset': 'medium',
+        'audio_bitrate': '128k',
+        'audio_sample_rate': 44100,
+        'max_width': 1920,
+        'image_quality': 85,
+        'image_resize': 100,
+    },
+    'YouTube 上传': {
+        'description': '高质量，适合 YouTube 上传',
+        'video_crf': 18,
+        'video_preset': 'slow',
+        'audio_bitrate': '256k',
+        'audio_sample_rate': 48000,
+        'image_quality': 95,
+        'image_resize': 100,
+    },
+    'iPhone 播放': {
+        'description': 'iPhone 原生播放兼容（H.264 High Profile）',
+        'video_crf': 22,
+        'video_preset': 'medium',
+        'audio_bitrate': '192k',
+        'audio_sample_rate': 44100,
+        'video_profile': 'high',
+        'video_level': '4.1',
+        'image_quality': 90,
+        'image_resize': 100,
+    },
+    '存档原始': {
+        'description': '无损复制，保留所有流（不重编码）',
+        'copy_codecs': True,
+        'video_crf': 0,
+        'video_preset': 'copy',
+        'audio_bitrate': '0k',
+        'image_quality': 100,
+        'image_resize': 100,
+    },
+    '网页嵌入': {
+        'description': 'WebM 格式，10MB 以内，网页嵌入友好',
+        'video_crf': 26,
+        'video_preset': 'fast',
+        'audio_bitrate': '96k',
+        'audio_sample_rate': 44100,
+        'max_width': 1280,
+        'image_quality': 75,
+        'image_resize': 80,
     },
 }
 

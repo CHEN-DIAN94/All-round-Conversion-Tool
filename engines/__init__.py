@@ -25,6 +25,7 @@ from engines.ffmpeg_utils import (
     export_ffmpeg_cmd, embed_subtitle, extract_subtitle,
     merge_media, crop_video,
 )
+from engines.gpu_scheduler import GpuScheduler, GpuBackend, GpuInfo
 
 __all__ = [
     # 核心转换
@@ -43,4 +44,6 @@ __all__ = [
     # FFmpeg 高级工具
     'export_ffmpeg_cmd', 'embed_subtitle', 'extract_subtitle',
     'merge_media', 'crop_video',
+    # GPU 调度
+    'GpuScheduler', 'GpuBackend', 'GpuInfo',
 ]

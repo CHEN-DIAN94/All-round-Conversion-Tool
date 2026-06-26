@@ -38,8 +38,11 @@ class TestDefaultPresets:
     """内置默认预设测试"""
 
     def test_default_presets_exist(self):
-        """内置默认预设应包含三个预设"""
-        assert len(_DEFAULT_PRESETS) == 3
+        """内置默认预设应至少包含三个基础预设"""
+        assert len(_DEFAULT_PRESETS) >= 3
+        # 基础预设必须存在
+        for name in ('微信发送', '剪辑存档', '网页上传'):
+            assert name in _DEFAULT_PRESETS
 
     def test_wechat_preset_exists(self):
         """微信发送预设应存在"""

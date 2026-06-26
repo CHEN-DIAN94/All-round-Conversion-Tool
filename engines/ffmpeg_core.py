@@ -8,7 +8,7 @@ engines.ffmpeg_core — FFmpeg 视频/音频转换引擎
 """
 
 
-__all__ = ['convert_video', 'convert_audio', 'extract_audio', 'trim_media', 'get_media_info']
+__all__ = ['convert_video', 'convert_audio', 'extract_audio', 'trim_media', 'get_media_info', 'FFmpegMonitor']
 
 import os
 import re

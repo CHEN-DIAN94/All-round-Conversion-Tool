@@ -1,0 +1,101 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================
+  # Job 1: 质量门禁
+  # ============================================
+  quality-gate:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
+
+  # ============================================
+  # Job 2: 代码质量检查
+  # ============================================
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install linters
+        run: pip install ruff
+      - name: Ruff check
+        run: ruff check . --output-format=github
+      - name: Ruff format check
+        run: ruff format --check .
+
+  # ============================================
+  # Job 3: 多平台构建
+  # ============================================
+  build:
+    needs: [quality-gate, lint]
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: 流光-Windows-x64
+          - os: macos-latest
+            artifact: 流光-macOS
+          - os: ubuntu-latest
+            artifact: 流光-Linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --windowed --name 流光 main.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+
+  # ============================================
+  # Job 4: 创建 GitHub Release
+  # ============================================
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            流光-Windows-x64/*
+            流光-macOS/*
+            流光-Linux-x64/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
