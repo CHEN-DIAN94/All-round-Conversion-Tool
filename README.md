@@ -81,10 +81,7 @@
 
 ## 🚀 快速开始
 
-### 方式一：直接运行 exe
-下载 `流光.exe`，双击运行。
-
-### 方式二：从源码运行
+### 方式：从源码运行
 ```bash
 # 克隆仓库
 git clone https://github.com/CHEN-DIAN94/All-round-Conversion-Tool.git
