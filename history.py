@@ -28,13 +28,20 @@ class HistoryManager:
         self._load()
 
     def _load(self) -> None:
-        """从文件加载历史。"""
+        """从文件加载历史。仅接受 list[dict] 结构，脏数据自动降级。"""
+        self._records = []
         try:
-            if self._file.exists():
-                with open(self._file, 'r', encoding='utf-8') as f:
-                    self._records = json.load(f)
+            if not self._file.exists():
+                return
+            with open(self._file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
         except (json.JSONDecodeError, OSError):
-            self._records = []
+            return
+
+        if not isinstance(data, list):
+            return
+
+        self._records = [record for record in data if isinstance(record, dict)]
 
     def _save(self) -> None:
         """保存到文件。"""

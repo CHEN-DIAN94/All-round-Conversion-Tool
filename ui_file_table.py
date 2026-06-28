@@ -17,13 +17,12 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox,
 )
 
-from workers import FileStatus
+from constants import FileStatus, MAX_FILES_PER_BATCH
 from utils import get_file_size_str, map_format_to_category
 from formats import (
     COL_FILE_NAME, COL_FILE_SIZE, COL_PROGRESS, COL_STATUS,
     _collect_files_from_paths,
 )
-from constants import MAX_FILES_PER_BATCH
 
 
 class FileTableMixin:
@@ -148,6 +147,57 @@ class FileTableMixin:
         )
         if files:
             self.add_files_to_table(files)
+
+    def _on_add_folder(self) -> None:
+        """点击「添加文件夹」：递归收集该文件夹下所有受支持的文件。"""
+        from formats import _collect_files_from_paths
+        start_dir = ''
+        if self._table.rowCount() > 0:
+            first_item = self._table.item(0, COL_FILE_NAME)
+            if first_item:
+                fp = first_item.data(Qt.ItemDataRole.UserRole)
+                if fp:
+                    start_dir = os.path.dirname(fp)
+
+        folder = QFileDialog.getExistingDirectory(
+            self, '选择要添加的文件夹', start_dir,
+        )
+        if not folder:
+            return
+
+        # 收集当前类别支持的扩展名
+        current_cat = 'video'
+        for key, btn in self._category_btns.items():
+            if btn.isChecked():
+                current_cat = key
+                break
+
+        # 工具类别接受所有文件
+        if current_cat == 'tools':
+            all_files = _collect_files_from_paths([folder])
+            self.add_files_to_table(all_files)
+            return
+
+        # 其他类别按扩展名过滤
+        from utils import map_format_to_category
+        all_files = _collect_files_from_paths([folder])
+        # 按当前类别过滤
+        filtered = []
+        for fp in all_files:
+            ext = os.path.splitext(fp)[1].lower()
+            cat = map_format_to_category(ext)
+            if cat == current_cat or (current_cat == 'document' and ext in ('.pdf', '.docx', '.doc')):
+                filtered.append(fp)
+
+        if not filtered:
+            QMessageBox.information(
+                self, '提示',
+                f'所选文件夹中没有找到当前类别（{current_cat}）支持的文件。\n'
+                f'共扫描 {len(all_files)} 个文件。',
+            )
+            return
+
+        self.add_files_to_table(filtered)
 
     def _on_clear(self) -> None:
         """清空列表。"""

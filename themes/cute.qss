@@ -30,7 +30,6 @@ QMainWindow, #CentralWidget {
     font-size: 9.5pt;
     color: #c090b0;
     padding: 0;
-    letter-spacing: 1px;
 }
 
 /* ---------- 设置卡片 ---------- */
@@ -178,6 +177,7 @@ QComboBox {
     color: #6a4060;
     selection-background-color: #ff69b4;
     selection-color: #fff;
+    min-height: 36px;
 }
 QComboBox:hover { border-color: #ff69b4; }
 QComboBox:focus { border-color: #c084fc; }
@@ -197,6 +197,28 @@ QComboBox QAbstractItemView {
 }
 QComboBox QAbstractItemView::item {
     padding: 7px 12px; border-radius: 10px; min-height: 24px;
+}
+
+/* ---------- 高级设置 / 预览面板 ---------- */
+#AdvancedSettings {
+    background-color: #fff8fa;
+    border: 1px solid #f0d0e0;
+    border-radius: 18px;
+}
+#PreviewPanel {
+    background-color: #fff8fa;
+    border: 1px solid #f0d0e0;
+    border-radius: 18px;
+}
+#PreviewLabel[previewState="empty"] {
+    color: #f0c0d8;
+}
+#PreviewLabel[previewState="icon"] {
+    color: #d090b8;
+}
+#PreviewInfo {
+    color: #c090b0;
+    font-size: 9pt;
 }
 
 /* ---------- 表格 ---------- */
@@ -252,7 +274,6 @@ QProgressBar#OverallProgress::chunk {
 #ProgressCount {
     color: #c090b0;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
     font-size: 10pt;
 }
 
@@ -330,6 +351,7 @@ QSpinBox, QSlider {
     border-radius: 10px;
     color: #6a4060;
     padding: 4px 8px;
+    min-height: 36px;
 }
 QSlider::groove:horizontal { height: 4px; background: #ffe0f0; border-radius: 2px; }
 QSlider::handle:horizontal {

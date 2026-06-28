@@ -2,6 +2,7 @@
 main.py — 流光入口
 
 确保在 Windows 上作为 GUI 应用启动时不带控制台窗口。
+启动 monitor.py 监控系统，捕获所有 Qt C++ 层崩溃信号。
 """
 
 import os
@@ -21,6 +22,18 @@ _launch_log_path = _log_dir / 'launch.log'
 _dump_path = _log_dir / 'crash_dump.log'
 
 
+def _describe_runtime() -> str:
+    frozen = getattr(sys, 'frozen', False)
+    meipass = getattr(sys, '_MEIPASS', '') if frozen else ''
+    return (
+        f'executable={sys.executable} | '
+        f'frozen={frozen} | '
+        f'meipass={meipass or "<none>"} | '
+        f'cwd={os.getcwd()} | '
+        f'current_dir={current_dir}'
+    )
+
+
 def _append_launch_log(message: str) -> None:
     with _launch_log_path.open('a', encoding='utf-8') as f:
         f.write(message + '\n')
@@ -32,22 +45,6 @@ def _write_crash_log(exc_info) -> str:
         f.write(''.join(traceback.format_exception(*exc_info)))
         f.write('\n')
     return str(_crash_log_path)
-
-
-def _enable_faulthandler() -> None:
-    try:
-        import atexit
-        import faulthandler
-        # L-03: faulthandler 使用独立文件，不与 crash dump 混用
-        _faulthandler_path = _log_dir / 'crash_traceback.log'
-        fh = _faulthandler_path.open('a', encoding='utf-8')
-        faulthandler.enable(file=fh, all_threads=True)
-        faulthandler.dump_traceback_later(120, repeat=True, file=fh)
-        # L-04: 注册 atexit 关闭文件句柄
-        atexit.register(fh.close)
-        sys._crash_fh = fh  # keep alive
-    except Exception:
-        pass
 
 
 def _enable_windows_crash_dump() -> None:
@@ -115,7 +112,16 @@ if sys.platform == 'win32':
         pass
 
 _append_launch_log('launcher start')
-_enable_faulthandler()
+_append_launch_log(_describe_runtime())
+
+# 启动监控系统（替代原 _enable_faulthandler）
+# 捕获 Qt C++ 层消息 + 段错误堆栈 + QThread 异常
+try:
+    from monitor import start_monitoring
+    start_monitoring(version='dev')
+except Exception as _e:
+    _append_launch_log(f'monitor start failed: {_e}')
+
 _enable_windows_crash_dump()
 
 if sys.platform == 'win32':
@@ -132,6 +138,12 @@ if sys.platform == 'win32':
 def main():
     """应用程序入口。"""
     try:
+        try:
+            import PyQt6  # noqa: F401
+            _append_launch_log('PyQt6 import ok')
+        except Exception:
+            _append_launch_log('PyQt6 import failed')
+            raise
         _append_launch_log('import ui')
         from ui import run_app
         _append_launch_log('run_app enter')
@@ -148,3 +160,4 @@ if __name__ == '__main__':
     except Exception:
         _write_crash_log(sys.exc_info())
         raise
+

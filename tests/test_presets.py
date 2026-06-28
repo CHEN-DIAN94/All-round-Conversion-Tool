@@ -124,6 +124,18 @@ class TestGetPreset:
         preset2 = manager.get_preset('微信发送')
         assert preset2['video_crf'] != 999
 
+    def test_description_stays_outside_advanced_defaults(self, manager):
+        """预设描述不应混入高级设置字段集合"""
+        preset = manager.get_preset('微信发送')
+        assert preset is not None
+        advanced_keys = {
+            'video_crf', 'video_preset', 'audio_bitrate',
+            'audio_sample_rate', 'image_quality', 'image_resize',
+        }
+        filtered = {key: value for key, value in preset.items() if key in advanced_keys}
+        assert 'description' not in filtered
+        assert filtered['video_crf'] == preset['video_crf']
+
 
 class TestListPresets:
     """list_presets 测试"""

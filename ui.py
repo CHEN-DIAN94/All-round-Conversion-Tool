@@ -86,6 +86,7 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._completed_count: int = 0
         self._empty_state_widget: Optional[QWidget] = None
         self._advanced_settings: dict = {}  # N-09: 高级设置缓存
+        self._advanced_dialog: Optional[AdvancedSettingsPanel] = None  # 高级设置弹窗
         # 文件去重缓存（O(1) 判重，替代 O(N) 表格扫描）
         self._file_paths_set: set[str] = set()
         # 用户偏好持久化
@@ -167,6 +168,7 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         # ---------- 设置卡片 ----------
         settings_card = QWidget()
         settings_card.setObjectName('SettingsCard')
+        settings_card.setMinimumHeight(260)  # 防止控件被压缩成细线
         settings_layout = QVBoxLayout(settings_card)
         settings_layout.setContentsMargins(20, 16, 20, 16)
         settings_layout.setSpacing(14)
@@ -210,7 +212,9 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         settings_layout.addLayout(cat_row)
 
         # 第二行：输出格式
-        fmt_row = QHBoxLayout()
+        self._fmt_row_widget = QWidget()
+        fmt_row = QHBoxLayout(self._fmt_row_widget)
+        fmt_row.setContentsMargins(0, 0, 0, 0)
         fmt_row.setSpacing(12)
         fmt_label = QLabel('输出格式')
         fmt_label.setObjectName('FieldLabel')
@@ -225,8 +229,7 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._populate_format_combo('video')
         fmt_row.addWidget(self._format_combo)
         fmt_row.addStretch()
-        settings_layout.addLayout(fmt_row)
-        self._fmt_row_widget = fmt_row  # 保存引用以便隐藏
+        settings_layout.addWidget(self._fmt_row_widget)
 
         # 工具面板（工具类别时显示，替代格式行）
         self._tool_panel = ToolPanel()
@@ -234,7 +237,9 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         settings_layout.addWidget(self._tool_panel)
 
         # 第三行：输出目录
-        dir_row = QHBoxLayout()
+        self._dir_row_widget = QWidget()
+        dir_row = QHBoxLayout(self._dir_row_widget)
+        dir_row.setContentsMargins(0, 0, 0, 0)
         dir_row.setSpacing(12)
         dir_label = QLabel('输出目录')
         dir_label.setObjectName('FieldLabel')
@@ -252,9 +257,9 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._output_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         dir_row.addWidget(self._output_dir_btn)
 
-        settings_layout.addLayout(dir_row)
+        settings_layout.addWidget(self._dir_row_widget)
 
-        # 第四行：覆盖选项
+        # 第四行：覆盖选项 + 转换后操作
         opts_row = QHBoxLayout()
         opts_row.setSpacing(12)
         spacer = QLabel('')
@@ -262,11 +267,27 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         opts_row.addWidget(spacer)
         self._overwrite_check = QCheckBox('覆盖同名文件')
         opts_row.addWidget(self._overwrite_check)
+
+        opts_row.addSpacing(24)
+        post_label = QLabel('转换完成后')
+        post_label.setObjectName('FieldLabel')
+        opts_row.addWidget(post_label)
+        self._post_action_combo = QComboBox()
+        self._post_action_combo.setMinimumHeight(36)
+        self._post_action_combo.setMinimumWidth(140)
+        self._post_action_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._post_action_combo.addItem('无操作', 'none')
+        self._post_action_combo.addItem('打开输出目录', 'open_dir')
+        self._post_action_combo.addItem('删除原文件', 'delete_src')
+        self._post_action_combo.addItem('关机', 'shutdown')
+        opts_row.addWidget(self._post_action_combo)
         opts_row.addStretch()
         settings_layout.addLayout(opts_row)
 
         # 第五行：命名模板
-        tmpl_row = QHBoxLayout()
+        self._tmpl_row_widget = QWidget()
+        tmpl_row = QHBoxLayout(self._tmpl_row_widget)
+        tmpl_row.setContentsMargins(0, 0, 0, 0)
         tmpl_row.setSpacing(12)
         tmpl_label = QLabel('命名模板')
         tmpl_label.setObjectName('FieldLabel')
@@ -276,7 +297,7 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._template_input = QComboBox()
         self._template_input.setEditable(True)
         self._template_input.setMinimumHeight(36)
-        self._template_input.setMinimumWidth(380)
+        self._template_input.setMinimumWidth(280)
         self._template_input.setCursor(Qt.CursorShape.PointingHandCursor)
         self._template_input.addItems([
             '{原名}.{ext}',
@@ -286,27 +307,33 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         ])
         self._template_input.setCurrentText('{原名}.{ext}')
         self._template_input.currentTextChanged.connect(self._save_settings)
+        self._template_input.currentTextChanged.connect(self._update_filename_preview)
         tmpl_row.addWidget(self._template_input)
 
         tmpl_hint = QLabel('{原名} {日期} {序号} {格式}')
         tmpl_hint.setObjectName('SectionHint')
         tmpl_row.addWidget(tmpl_hint)
-        tmpl_row.addStretch()
-        settings_layout.addLayout(tmpl_row)
+        # 文件名预览标签
+        self._filename_preview_label = QLabel('')
+        self._filename_preview_label.setObjectName('SectionHint')
+        self._filename_preview_label.setStyleSheet('color: #007aff; font-style: italic;')
+        tmpl_row.addWidget(self._filename_preview_label, 1)
+        settings_layout.addWidget(self._tmpl_row_widget)
 
         # 第六行：快速预设
         self._preset_combo = PresetCombo()
         self._preset_combo.preset_applied.connect(self._on_preset_applied)
-        settings_layout.addWidget(self._preset_combo)
+        preset_row = QHBoxLayout()
+        preset_row.setContentsMargins(0, 0, 0, 0)
+        preset_row.setSpacing(12)
+        preset_label = QLabel('快速预设')
+        preset_label.setObjectName('FieldLabel')
+        preset_label.setFixedWidth(70)
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(self._preset_combo, 1)
+        settings_layout.addLayout(preset_row)
 
         layout.addWidget(settings_card)
-
-        # ---------- 高级设置（可折叠） ----------
-        self._advanced_panel = AdvancedSettingsPanel()
-        self._advanced_panel.setObjectName('AdvancedSettings')
-        self._advanced_panel.setVisible(False)  # 默认隐藏
-        self._advanced_panel.settings_changed.connect(self._on_advanced_settings_changed)
-        layout.addWidget(self._advanced_panel)
 
         # ---------- 分割线 ----------
         sep = QFrame()
@@ -318,6 +345,12 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         # ---------- 预览面板 ----------
         self._preview_panel = PreviewPanel(self)
         layout.addWidget(self._preview_panel)
+
+        # ---------- 高级设置弹窗（不再嵌入主布局） ----------
+        self._advanced_panel = AdvancedSettingsPanel(self)
+        self._advanced_panel.setObjectName('AdvancedSettings')
+        self._advanced_panel.settings_changed.connect(self._on_advanced_settings_changed)
+        self._advanced_panel.finished.connect(self._on_advanced_dialog_closed)
 
         # ---------- 文件列表标题 ----------
         list_header = QHBoxLayout()
@@ -425,6 +458,8 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         # 左侧：文件管理
         self._add_file_btn = QPushButton('＋ 添加文件')
         self._add_file_btn.setObjectName('SecondaryButton')
+        self._add_folder_btn = QPushButton('📂 添加文件夹')
+        self._add_folder_btn.setObjectName('SecondaryButton')
         self._clear_btn = QPushButton('清空')
         self._clear_btn.setObjectName('SecondaryButton')
         self._remove_selected_btn = QPushButton('移除选中')
@@ -433,11 +468,12 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._advanced_btn.setObjectName('SecondaryButton')
         self._advanced_btn.setCheckable(True)
 
-        for b in (self._add_file_btn, self._clear_btn, self._remove_selected_btn, self._advanced_btn):
+        for b in (self._add_file_btn, self._add_folder_btn, self._clear_btn, self._remove_selected_btn, self._advanced_btn):
             b.setMinimumHeight(42)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
         btn_layout.addWidget(self._add_file_btn)
+        btn_layout.addWidget(self._add_folder_btn)
         btn_layout.addWidget(self._clear_btn)
         btn_layout.addWidget(self._remove_selected_btn)
         btn_layout.addWidget(self._advanced_btn)
@@ -497,8 +533,18 @@ class MainWindow(FileTableMixin, ConversionMixin, SettingsMixin, QMainWindow):
         self._status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage('就绪')
+        # 安装事件过滤器：点击状态栏打开输出目录
+        self._status_bar.installEventFilter(self)
 
         self.resize(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)
+
+    def eventFilter(self, obj, event) -> bool:
+        """事件过滤器：点击状态栏打开输出目录。"""
+        if obj is self._status_bar and event.type() == event.Type.MouseButtonPress:
+            output_dir = getattr(self, '_last_output_dir', '')
+            if output_dir and os.path.isdir(output_dir):
+                self._open_output_dir_toast(output_dir)
+        return super().eventFilter(obj, event)
 
 
 def _apply_windows_taskbar_identity() -> None:
@@ -527,7 +573,39 @@ def run_app() -> None:
     icon = QIcon(get_resource_path('icon.ico'))
     app.setWindowIcon(icon)
 
+    # 单实例检测：尝试连接已存在的服务器
+    from PyQt6.QtNetwork import QLocalSocket, QLocalServer
+    INSTANCE_NAME = 'LiuGuangSingleInstance_v1'
+    socket = QLocalSocket()
+    socket.connectToServer(INSTANCE_NAME)
+    if socket.waitForConnected(300):
+        # 已有实例在运行，发送激活消息后退出
+        socket.write(b'activate')
+        socket.waitForBytesWritten(300)
+        socket.disconnectFromServer()
+        sys.exit(0)
+
+    # 第一个实例：创建本地服务器监听后续实例
+    QLocalServer.removeServer(INSTANCE_NAME)  # 清理残留
+    instance_server = QLocalServer()
+    instance_server.listen(INSTANCE_NAME)
+
     window = MainWindow()
     window.setWindowIcon(icon)
     window.show()
+
+    # 收到第二个实例连接时，把窗口提到前台
+    def _on_new_connection():
+        while instance_server.hasPendingConnections():
+            client = instance_server.nextPendingConnection()
+            if client:
+                client.waitForReadyRead(300)
+                client.readAll()
+                client.disconnectFromServer()
+        # 激活主窗口
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
+    instance_server.newConnection.connect(_on_new_connection)
+
     sys.exit(app.exec())

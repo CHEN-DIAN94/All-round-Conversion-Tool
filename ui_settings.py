@@ -13,6 +13,9 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from logging_config import get_logger
+from monitor import trace
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCloseEvent, QShortcut, QKeySequence
 from PyQt6.QtWidgets import (
@@ -22,7 +25,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog,
 )
 
-from workers import FileStatus
+from constants import FileStatus
 from utils import (
     get_file_size_str,
     map_format_to_category, ensure_output_dir, CREATE_NO_WINDOW,
@@ -33,9 +36,11 @@ from formats import (
     COL_FILE_NAME, COL_STATUS, COL_PROGRESS,
     _is_legacy_doc,
 )
-from widgets import ErrorDetailDialog, AdvancedSettingsPanel
+from widgets import ErrorDetailDialog, AdvancedSettingsPanel, HistoryDialog
 from constants import SHUTDOWN_WAIT_MS
 from themes import THEMES, DEFAULT_THEME, get_theme_qss
+
+logger = get_logger(__name__)
 
 
 class SettingsMixin:
@@ -62,6 +67,7 @@ class SettingsMixin:
     def _connect_signals(self) -> None:
         """连接信号与槽。"""
         self._add_file_btn.clicked.connect(self._on_add_file)
+        self._add_folder_btn.clicked.connect(self._on_add_folder)
         self._clear_btn.clicked.connect(self._on_clear)
         self._remove_selected_btn.clicked.connect(self._on_remove_selected)
         self._start_btn.clicked.connect(self._on_start_all)
@@ -74,19 +80,19 @@ class SettingsMixin:
         self._category_group.idClicked.connect(self._on_category_changed)
         self._format_combo.currentIndexChanged.connect(self._update_start_button)
         self._format_combo.currentIndexChanged.connect(self._save_settings)
+        self._format_combo.currentIndexChanged.connect(self._update_filename_preview)
         self._overwrite_check.stateChanged.connect(self._save_settings)
+        self._post_action_combo.currentIndexChanged.connect(self._save_settings)
         self._table.itemDoubleClicked.connect(self._on_table_double_clicked)
         self._table.currentItemChanged.connect(self._on_table_selection_changed)
 
         # 键盘快捷键
         QShortcut(QKeySequence('Ctrl+O'), self).activated.connect(self._on_add_file)
+        QShortcut(QKeySequence('Ctrl+Shift+O'), self).activated.connect(self._on_add_folder)
         QShortcut(QKeySequence('Delete'), self).activated.connect(self._on_remove_selected)
         QShortcut(QKeySequence('Ctrl+A'), self).activated.connect(self._table.selectAll)
         QShortcut(QKeySequence('Escape'), self).activated.connect(self._on_cancel)
         QShortcut(QKeySequence('Ctrl+Return'), self).activated.connect(self._on_start_all)
-        QShortcut(QKeySequence('Ctrl+Z'), self).activated.connect(self._on_undo_remove)
-        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._on_save_project)
-        QShortcut(QKeySequence('Ctrl+Shift+O'), self).activated.connect(self._on_open_project)
         QShortcut(QKeySequence('Ctrl+E'), self).activated.connect(self._on_export_ffmpeg_cmd_shortcut)
         QShortcut(QKeySequence('F5'), self).activated.connect(self._on_refresh_files)
 
@@ -102,13 +108,28 @@ class SettingsMixin:
     def _on_category_changed(self, idx: int) -> None:
         """类别切换时更新格式下拉框。"""
         cat_keys = CATEGORY_KEYS
+        logger.info('切换分类 idx=%s keys=%s', idx, cat_keys)
         if 0 <= idx < len(cat_keys):
             cat = cat_keys[idx]
             is_tools = (cat == 'tools')
+            logger.info('分类切换 cat=%s is_tools=%s advanced_checked=%s', cat, is_tools, self._advanced_btn.isChecked() if hasattr(self, '_advanced_btn') else None)
             # 切换格式行/工具面板的可见性
             self._set_format_row_visible(not is_tools)
             self._tool_panel.setVisible(is_tools)
             self._set_dir_row_visible(not is_tools)
+            if hasattr(self, '_tmpl_row_widget'):
+                self._tmpl_row_widget.setVisible(not is_tools)
+            if hasattr(self, '_preset_combo'):
+                self._preset_combo.setVisible(not is_tools)
+            if hasattr(self, '_advanced_btn'):
+                self._advanced_btn.setVisible(not is_tools)
+            if hasattr(self, '_advanced_panel'):
+                if is_tools:
+                    self._advanced_panel.hide()
+                    if hasattr(self, '_advanced_btn'):
+                        self._advanced_btn.setChecked(False)
+            if is_tools and hasattr(self, '_advanced_btn'):
+                self._advanced_btn.setChecked(False)
             if not is_tools:
                 self._populate_format_combo(cat)
             self._update_start_button()
@@ -116,29 +137,31 @@ class SettingsMixin:
 
     def _set_format_row_visible(self, visible: bool) -> None:
         """显示/隐藏格式选择行。"""
-        self._format_combo.setVisible(visible)
-        # 遍历 fmt_row 内的 label
-        layout = self._fmt_row_widget
-        if hasattr(layout, 'count'):
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if item and item.widget():
-                    item.widget().setVisible(visible)
+        if hasattr(self, '_fmt_row_widget'):
+            self._fmt_row_widget.setVisible(visible)
 
     def _set_dir_row_visible(self, visible: bool) -> None:
         """显示/隐藏输出目录行。"""
-        if hasattr(self, '_output_dir_label'):
-            self._output_dir_label.setVisible(visible)
-        if hasattr(self, '_output_dir_btn'):
-            self._output_dir_btn.setVisible(visible)
+        if hasattr(self, '_dir_row_widget'):
+            self._dir_row_widget.setVisible(visible)
 
     def _on_toggle_advanced(self, checked: bool) -> None:
-        """切换高级设置面板显示/隐藏。"""
-        self._advanced_panel.setVisible(checked)
+        """打开高级设置弹窗。"""
+        logger.info('打开高级设置弹窗 checked=%s', checked)
         if checked:
+            self._advanced_panel.show()
+            self._advanced_panel.raise_()
+            self._advanced_panel.activateWindow()
             self._advanced_btn.setText('⚙ 收起设置')
         else:
+            self._advanced_panel.hide()
             self._advanced_btn.setText('⚙ 高级设置')
+        logger.info('高级设置弹窗 visible=%s', self._advanced_panel.isVisible())
+
+    def _on_advanced_dialog_closed(self, result) -> None:
+        """高级设置弹窗关闭时同步按钮状态。"""
+        self._advanced_btn.setChecked(False)
+        self._advanced_btn.setText('⚙ 高级设置')
 
     def _on_theme_changed(self, idx: int) -> None:
         """主题切换。"""
@@ -149,17 +172,24 @@ class SettingsMixin:
 
     def _apply_theme(self, theme_key: str) -> None:
         """应用指定主题（含动画）。"""
+        trace('theme.apply.enter', theme=theme_key)
         from themes import activate_animation
         qss = get_theme_qss(theme_key)
         if qss:
             QApplication.instance().setStyleSheet(qss)
         self._current_theme = theme_key
+        trace('theme.apply.qss_done', theme=theme_key)
         # 激活动画（如有）
         activate_animation(theme_key, self)
+        trace('theme.apply.anim_done', theme=theme_key)
 
     def _on_advanced_settings_changed(self, settings: dict) -> None:
         """高级设置变更回调。"""
-        self._advanced_settings = settings
+        allowed_keys = set(AdvancedSettingsPanel.DEFAULTS)
+        self._advanced_settings = {
+            key: value for key, value in settings.items()
+            if key in allowed_keys
+        }
         self._save_settings()
         self._status_bar.showMessage('高级设置已更新', 2000)
 
@@ -337,6 +367,14 @@ class SettingsMixin:
                 self._output_dir = saved_dir
                 self._output_dir_label.setText(saved_dir)
 
+            # 恢复转换后操作
+            if hasattr(self, '_post_action_combo'):
+                saved_post = self._settings.value('post_action', 'none', type=str)
+                for i in range(self._post_action_combo.count()):
+                    if self._post_action_combo.itemData(i) == saved_post:
+                        self._post_action_combo.setCurrentIndex(i)
+                        break
+
             cat_keys = CATEGORY_KEYS
             saved_cat = self._settings.value('category', 'video', type=str)
             if saved_cat not in cat_keys:
@@ -436,7 +474,45 @@ class SettingsMixin:
         if hasattr(self, '_template_input'):
             self._settings.setValue('naming_template', self._template_input.currentText())
 
+        # 保存转换后操作
+        if hasattr(self, '_post_action_combo'):
+            self._settings.setValue('post_action', self._post_action_combo.currentData() or 'none')
+
         self._settings.sync()
+
+    def _update_filename_preview(self, *args) -> None:
+        """实时更新输出文件名预览。"""
+        if not hasattr(self, '_filename_preview_label'):
+            return
+        template = self._template_input.currentText().strip() if hasattr(self, '_template_input') else ''
+        if not template or '{' not in template:
+            template = '{原名}.{ext}'
+
+        # 取当前选中文件作为样例，没有则用「示例文件」
+        sample_name = '示例文件'
+        if self._table.rowCount() > 0:
+            item = self._table.item(0, COL_FILE_NAME)
+            if item:
+                fp = item.data(Qt.ItemDataRole.UserRole)
+                if fp:
+                    sample_name = Path(fp).stem
+
+        # 取当前选中的输出扩展名
+        sample_ext = 'mp4'
+        if hasattr(self, '_format_combo'):
+            fmt_data = self._format_combo.currentData()
+            if fmt_data:
+                sample_ext = fmt_data[0].lstrip('.')
+
+        from datetime import datetime
+        now = datetime.now()
+        preview = template.replace('{原名}', sample_name)
+        preview = preview.replace('{日期}', now.strftime('%Y%m%d'))
+        preview = preview.replace('{序号}', '001')
+        preview = preview.replace('{格式}', sample_ext)
+        preview = preview.replace('{ext}', sample_ext)
+
+        self._filename_preview_label.setText(f'预览: {preview}')
 
     def _on_table_selection_changed(self, current, previous) -> None:
         """表格选中行变化时更新预览。"""
@@ -524,6 +600,7 @@ class SettingsMixin:
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """关闭事件（优雅退出三步协议）。"""
+        trace('closeEvent.enter', converting=self._is_converting)
         if self._is_converting:
             reply = QMessageBox.question(
                 self, '确认退出',
@@ -540,25 +617,16 @@ class SettingsMixin:
         # 停止主题动画
         from themes import stop_current_animation
         stop_current_animation()
+        trace('closeEvent.anim_stopped')
 
         # 优雅退出三步协议
         if self._orchestrator and self._orchestrator.workers:
-            # Step 1: 发送取消信号
             self._orchestrator.cancel_all()
-
-            # Step 2: 等待所有 worker 退出（最多 5 秒），显示进度对话框
-            progress = QProgressDialog("正在安全退出...", None, 0, 0, self)
-            progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setCancelButton(None)
-            progress.setMinimumDuration(0)
-            progress.show()
-            QApplication.processEvents()
-
-            self._orchestrator.wait_all(SHUTDOWN_WAIT_MS)
-
-            progress.close()
+            self._orchestrator.wait_all(timeout_ms=3000)
+            trace('closeEvent.threads_joined')
 
         event.accept()
+        trace('closeEvent.exit')
 
     def _on_preset_applied(self, params: dict) -> None:
         """预设应用回调。"""
@@ -573,13 +641,35 @@ class SettingsMixin:
             self._status_bar.showMessage(f'预设已保存: {name}', 3000)
             return
 
+        allowed_keys = set(AdvancedSettingsPanel.DEFAULTS)
+        filtered = {
+            key: value for key, value in params.items()
+            if key in allowed_keys
+        }
+
         # 应用预设参数到高级设置面板
-        self._advanced_settings.update(params)
+        self._advanced_settings.update(filtered)
         self._advanced_panel.set_settings(self._advanced_settings)
         self._save_settings()
         self._status_bar.showMessage('预设已应用', 2000)
 
     def _on_show_history(self) -> None:
         """显示转换历史对话框。"""
-        dialog = HistoryDialog(self)
-        dialog.exec()
+        trace('history.show.enter')
+        try:
+            dialog = HistoryDialog(self)
+            trace('history.dialog_created')
+            dialog.setModal(False)
+            dialog.show()
+            trace('history.dialog_shown')
+            dialog.raise_()
+            dialog.activateWindow()
+            if not hasattr(self, '_history_dialogs'):
+                self._history_dialogs = []
+            self._history_dialogs.append(dialog)
+            trace('history.dialog_stored', total=len(self._history_dialogs))
+        except Exception as e:
+            import traceback as _tb
+            from monitor import monitor_log
+            monitor_log(f'!!! _on_show_history crashed !!!\n{_tb.format_exc()}')
+            trace('history.crash', error=repr(e))

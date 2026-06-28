@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer, QThread
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QColor, QFont, QPainter, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QTableWidget, QStyledItemDelegate, QStyle,
@@ -189,9 +189,9 @@ class ErrorDetailDialog(QDialog):
 # AdvancedSettingsPanel — 高级参数设置面板
 # ==============================================================
 
-class AdvancedSettingsPanel(QWidget):
+class AdvancedSettingsPanel(QDialog):
     """
-    高级参数设置面板。
+    高级参数设置对话框（弹窗）。
 
     支持视频/音频/图片参数调整，提供快速预设。
     """
@@ -218,17 +218,23 @@ class AdvancedSettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._settings = self.DEFAULTS.copy()
+        self.setWindowTitle('高级设置')
+        self.setMinimumSize(500, 400)
+        self.setModal(False)
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
 
         # 预设选择
         preset_group = QGroupBox('快速预设')
         preset_layout = QHBoxLayout(preset_group)
+        preset_layout.setSpacing(8)
 
         for preset_name in self.PRESETS:
             btn = QPushButton(preset_name)
+            btn.setMinimumHeight(36)
             btn.clicked.connect(lambda checked, name=preset_name: self._apply_preset(name))
             preset_layout.addWidget(btn)
 
@@ -237,10 +243,12 @@ class AdvancedSettingsPanel(QWidget):
         # 视频参数
         video_group = QGroupBox('视频参数')
         video_layout = QFormLayout(video_group)
+        video_layout.setSpacing(8)
 
         self.crf_spin = QSpinBox()
         self.crf_spin.setRange(0, 51)
         self.crf_spin.setValue(self._settings['video_crf'])
+        self.crf_spin.setMinimumHeight(36)
         self.crf_spin.setToolTip('CRF 值越低，质量越高，文件越大（推荐: 18-28）')
         video_layout.addRow('CRF 质量:', self.crf_spin)
 
@@ -249,6 +257,7 @@ class AdvancedSettingsPanel(QWidget):
             'ultrafast', 'superfast', 'veryfast', 'faster',
             'fast', 'medium', 'slow', 'slower', 'veryslow',
         ])
+        self.preset_combo.setMinimumHeight(36)
         self.preset_combo.setCurrentText(self._settings['video_preset'])
         self.preset_combo.setToolTip('编码速度，越慢质量越高')
         video_layout.addRow('编码预设:', self.preset_combo)
@@ -258,14 +267,17 @@ class AdvancedSettingsPanel(QWidget):
         # 音频参数
         audio_group = QGroupBox('音频参数')
         audio_layout = QFormLayout(audio_group)
+        audio_layout.setSpacing(8)
 
         self.bitrate_combo = QComboBox()
         self.bitrate_combo.addItems(['96k', '128k', '160k', '192k', '256k', '320k'])
+        self.bitrate_combo.setMinimumHeight(36)
         self.bitrate_combo.setCurrentText(self._settings['audio_bitrate'])
         audio_layout.addRow('比特率:', self.bitrate_combo)
 
         self.sample_rate_combo = QComboBox()
         self.sample_rate_combo.addItems(['22050', '44100', '48000', '96000'])
+        self.sample_rate_combo.setMinimumHeight(36)
         self.sample_rate_combo.setCurrentText(str(self._settings['audio_sample_rate']))
         audio_layout.addRow('采样率:', self.sample_rate_combo)
 
@@ -274,15 +286,18 @@ class AdvancedSettingsPanel(QWidget):
         # 图片参数
         image_group = QGroupBox('图片参数')
         image_layout = QFormLayout(image_group)
+        image_layout.setSpacing(8)
 
         self.quality_spin = QSpinBox()
         self.quality_spin.setRange(1, 100)
         self.quality_spin.setValue(self._settings['image_quality'])
+        self.quality_spin.setMinimumHeight(36)
         image_layout.addRow('质量:', self.quality_spin)
 
         self.resize_spin = QSpinBox()
         self.resize_spin.setRange(1, 1000)
         self.resize_spin.setValue(self._settings['image_resize'])
+        self.resize_spin.setMinimumHeight(36)
         self.resize_spin.setSuffix('%')
         image_layout.addRow('缩放:', self.resize_spin)
 
@@ -290,14 +305,17 @@ class AdvancedSettingsPanel(QWidget):
 
         # 操作按钮
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
 
         btn_reset = QPushButton('恢复默认')
+        btn_reset.setMinimumHeight(36)
         btn_reset.clicked.connect(self._reset_defaults)
         btn_layout.addWidget(btn_reset)
 
         btn_layout.addStretch()
 
         btn_apply = QPushButton('应用')
+        btn_apply.setMinimumHeight(36)
         btn_apply.clicked.connect(self._emit_settings)
         btn_layout.addWidget(btn_apply)
 
@@ -353,6 +371,75 @@ _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'
 _VIDEO_EXTS = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.3gp', '.ogv', '.m2ts', '.vob'}
 
 
+def _safe_load_pixmap(file_path: str) -> QPixmap:
+    """
+    安全加载 QPixmap。
+
+    直接 QPixmap(path) 在文件损坏或正被写入时可能段错误。
+    改为先用 QImage 加载（更安全），再转 QPixmap。
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return QPixmap()
+    try:
+        if os.path.getsize(file_path) == 0:
+            return QPixmap()
+        img = QImage(file_path)
+        if img.isNull():
+            return QPixmap()
+        return QPixmap.fromImage(img)
+    except Exception:
+        return QPixmap()
+
+
+class _ThumbnailExtractor(QThread):
+    """后台提取视频第一帧，避免阻塞主线程。"""
+    finished_ok = pyqtSignal(str, QPixmap)  # (request_path, pixmap)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self._file_path = file_path
+
+    def run(self) -> None:
+        pixmap = self._extract(self._file_path)
+        # 发射前检查 pixmap 是否有效
+        if not pixmap.isNull():
+            self.finished_ok.emit(self._file_path, pixmap)
+
+    @staticmethod
+    def _extract(file_path: str) -> QPixmap:
+        """用 ffmpeg 提取视频第一帧。"""
+        ffmpeg = get_ffmpeg_path()
+        if not ffmpeg:
+            return QPixmap()
+        tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            cmd = [
+                ffmpeg, '-y',
+                '-i', file_path,
+                '-vframes', '1',
+                '-q:v', '2',
+                tmp_path,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
+            if result.returncode == 0 and os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0:
+                return _safe_load_pixmap(tmp_path)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return QPixmap()
+
+
 class PreviewPanel(QWidget):
     """
     文件预览面板。
@@ -367,6 +454,12 @@ class PreviewPanel(QWidget):
         super().__init__(parent)
         self._current_path = ''
         self._thumbnail_cache: dict[str, QPixmap] = {}  # path -> QPixmap 缓存
+        self._preview_label_style = ''
+        self._empty_icon_text = '🖼'
+        self._generic_icon_font_size = 48
+        self._empty_icon_font_size = 32
+        self._pending_video_path = ''
+        self._thumbnail_thread: _ThumbnailExtractor | None = None
         self._init_ui()
 
     def _init_ui(self):
@@ -384,13 +477,13 @@ class PreviewPanel(QWidget):
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setMinimumHeight(100)
         self._preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preview_label.setText(self._empty_icon_text)
         layout.addWidget(self._preview_label)
 
         # 文件信息标签
         self._info_label = QLabel('选中文件以预览')
         self._info_label.setObjectName('PreviewInfo')
         self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._info_label.setStyleSheet('font-size: 9pt; color: #888;')
         layout.addWidget(self._info_label)
 
         # 默认状态
@@ -398,9 +491,25 @@ class PreviewPanel(QWidget):
 
     def _show_empty(self):
         """显示空状态。"""
-        self._preview_label.setText('🖼')
-        self._preview_label.setStyleSheet('font-size: 32pt; color: #ccc;')
+        self._preview_label.setPixmap(QPixmap())
+        self._preview_label.setText(self._empty_icon_text)
+        self._preview_label.setProperty('previewState', 'empty')
+        self._refresh_preview_label_style()
         self._info_label.setText('选中文件以预览')
+
+    def _refresh_preview_label_style(self):
+        """根据当前状态刷新预览标签样式。"""
+        state = self._preview_label.property('previewState') or 'default'
+        if state == 'empty':
+            self._preview_label_style = f'font-size: {self._empty_icon_font_size}pt;'
+        elif state == 'icon':
+            self._preview_label_style = f'font-size: {self._generic_icon_font_size}pt;'
+        else:
+            self._preview_label_style = ''
+        self._preview_label.setStyleSheet(self._preview_label_style)
+        self._preview_label.style().unpolish(self._preview_label)
+        self._preview_label.style().polish(self._preview_label)
+        self._preview_label.update()
 
     def preview_file(self, file_path: str) -> None:
         """预览指定文件。"""
@@ -425,8 +534,8 @@ class PreviewPanel(QWidget):
             self._show_generic(file_name, size_str, ext)
 
     def _show_image(self, file_path: str, name: str, size: str):
-        """显示图片预览。"""
-        pixmap = QPixmap(file_path)
+        """显示图片预览。使用 _safe_load_pixmap 避免段错误。"""
+        pixmap = _safe_load_pixmap(file_path)
         if pixmap.isNull():
             self._show_generic(name, size, Path(file_path).suffix)
             return
@@ -439,11 +548,13 @@ class PreviewPanel(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._preview_label.setPixmap(scaled)
-        self._preview_label.setStyleSheet('')
+        self._preview_label.setText('')
+        self._preview_label.setProperty('previewState', 'image')
+        self._refresh_preview_label_style()
         self._info_label.setText(f'{name}  |  {size}  |  {pixmap.width()}×{pixmap.height()}')
 
     def _show_video_thumbnail(self, file_path: str, name: str, size: str):
-        """显示视频封面（ffmpeg 提取第一帧）。"""
+        """显示视频封面（ffmpeg 后台提取第一帧，不阻塞 UI 线程）。"""
         # 检查缓存
         if file_path in self._thumbnail_cache:
             pixmap = self._thumbnail_cache[file_path]
@@ -454,64 +565,69 @@ class PreviewPanel(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 self._preview_label.setPixmap(scaled)
-                self._preview_label.setStyleSheet('')
+                self._preview_label.setText('')
+                self._preview_label.setProperty('previewState', 'image')
+                self._refresh_preview_label_style()
                 self._info_label.setText(f'🎬 {name}  |  {size}')
                 return
 
-        # 提取封面
-        pixmap = self._extract_thumbnail(file_path)
-        if pixmap and not pixmap.isNull():
-            self._thumbnail_cache[file_path] = pixmap
-            scaled = pixmap.scaled(
-                self._preview_label.width() - 16, 160,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._preview_label.setPixmap(scaled)
-            self._preview_label.setStyleSheet('')
-            self._info_label.setText(f'🎬 {name}  |  {size}')
-        else:
-            self._show_generic(name, size, '.mp4')
-            self._info_label.setText(f'🎬 {name}  |  {size}  |  无法提取封面')
+        # 取消上一个未完成的后台提取
+        self._stop_thumbnail_thread()
 
-    def _extract_thumbnail(self, file_path: str) -> QPixmap:
-        """用 ffmpeg 提取视频第一帧。"""
-        ffmpeg = get_ffmpeg_path()
-        # 检查 ffmpeg 是否可用
-        if not ffmpeg or ffmpeg == 'ffmpeg':
-            # 尝试系统 ffmpeg
-            pass
+        # 显示占位状态
+        self._pending_video_path = file_path
+        self._preview_label.setPixmap(QPixmap())
+        self._preview_label.setText('🎬')
+        self._preview_label.setProperty('previewState', 'icon')
+        self._refresh_preview_label_style()
+        self._info_label.setText(f'🎬 {name}  |  {size}  |  正在提取封面...')
 
-        tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-        tmp_path = tmp.name
-        tmp.close()
+        # 启动后台线程提取封面
+        self._thumbnail_thread = _ThumbnailExtractor(file_path, self)
+        self._thumbnail_thread.finished_ok.connect(self._on_thumbnail_ready)
+        self._thumbnail_thread.start()
 
+    def _on_thumbnail_ready(self, request_path: str, pixmap: QPixmap) -> None:
+        """后台线程提取封面完成的回调（在主线程执行）。"""
+        # 如果用户已切换到其他文件，忽略结果
+        if request_path != self._current_path:
+            return
+        if pixmap.isNull():
+            return
+
+        self._thumbnail_cache[request_path] = pixmap
+        scaled = pixmap.scaled(
+            self._preview_label.width() - 16, 160,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._preview_label.setPixmap(scaled)
+        self._preview_label.setText('')
+        self._preview_label.setProperty('previewState', 'image')
+        self._refresh_preview_label_style()
+
+        # 恢复 info_label（不含"正在提取封面..."）
+        name = os.path.basename(request_path)
         try:
-            cmd = [
-                ffmpeg, '-y',
-                '-i', file_path,
-                '-vframes', '1',
-                '-q:v', '2',
-                tmp_path,
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=10,
-                creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
-            )
-            if result.returncode == 0 and os.path.isfile(tmp_path):
-                pixmap = QPixmap(tmp_path)
-                return pixmap
-        except Exception:
-            pass
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            size = self._format_size(os.path.getsize(request_path))
+        except OSError:
+            size = '?'
+        self._info_label.setText(f'🎬 {name}  |  {size}')
 
-        return QPixmap()
+    def _stop_thumbnail_thread(self) -> None:
+        """停止正在运行的后台缩略图提取线程。"""
+        if self._thumbnail_thread is not None:
+            try:
+                if self._thumbnail_thread.isRunning():
+                    self._thumbnail_thread.quit()
+                    self._thumbnail_thread.wait(2000)
+            except Exception:
+                pass
+            try:
+                self._thumbnail_thread.finished_ok.disconnect()
+            except TypeError:
+                pass
+            self._thumbnail_thread = None
 
     def _show_generic(self, name: str, size: str, ext: str):
         """显示通用文件信息。"""
@@ -523,13 +639,17 @@ class PreviewPanel(QWidget):
             '.zip': '📦', '.rar': '📦',
         }
         icon = icons.get(ext, '📎')
+        self._preview_label.setPixmap(QPixmap())
         self._preview_label.setText(icon)
-        self._preview_label.setStyleSheet(f'font-size: 48pt;')
+        self._preview_label.setProperty('previewState', 'icon')
+        self._refresh_preview_label_style()
         self._info_label.setText(f'{icon} {name}  |  {size}')
 
     def clear(self):
         """清空预览。"""
+        self._stop_thumbnail_thread()
         self._current_path = ''
+        self._pending_video_path = ''
         self._show_empty()
 
     @staticmethod
@@ -553,6 +673,7 @@ class HistoryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle('转换历史')
         self.setMinimumSize(800, 500)
+        self._all_records: list[dict] = []
         self._init_ui()
         self._load_history()
 
@@ -625,11 +746,14 @@ class HistoryDialog(QDialog):
         from history import HistoryManager
         hm = HistoryManager()
         if records is None:
-            records = hm.get_recent(200)
+            self._all_records = [record for record in hm.get_recent(200) if isinstance(record, dict)]
+            safe_records = self._all_records
+        else:
+            safe_records = [record for record in records if isinstance(record, dict)]
 
-        self._records = records  # 缓存用于复制命令
-        self._table.setRowCount(len(records))
-        for i, r in enumerate(records):
+        self._records = safe_records  # 缓存用于复制命令
+        self._table.setRowCount(len(safe_records))
+        for i, r in enumerate(safe_records):
             ts = r.get('timestamp', '')[:19].replace('T', ' ')
             self._table.setItem(i, 0, QTableWidgetItem(ts))
             self._table.setItem(i, 1, QTableWidgetItem(r.get('type', '')))
@@ -660,16 +784,22 @@ class HistoryDialog(QDialog):
             out_item.setToolTip(r.get('output', ''))
             self._table.setItem(i, 5, out_item)
 
-        self._info_label.setText(f'共 {len(records)} 条记录  |  总计 {hm.count} 条')
+        self._info_label.setText(f'共 {len(safe_records)} 条记录  |  总计 {hm.count} 条')
 
     def _on_search(self, text):
         """搜索。"""
-        if not text.strip():
-            self._load_history()
+        keyword = text.strip().lower()
+        if not keyword:
+            self._load_history(self._all_records)
             return
-        from history import HistoryManager
-        hm = HistoryManager()
-        results = hm.search(text.strip())
+        results = [
+            record for record in self._all_records
+            if keyword in record.get('input', '').lower()
+            or keyword in record.get('output', '').lower()
+            or keyword in record.get('type', '').lower()
+            or keyword in record.get('error', '').lower()
+            or keyword in record.get('ffmpeg_cmd', '').lower()
+        ]
         self._load_history(results)
 
     def _on_clear(self):
@@ -683,7 +813,8 @@ class HistoryDialog(QDialog):
             from history import HistoryManager
             hm = HistoryManager()
             hm.clear()
-            self._load_history()
+            self._all_records = []
+            self._load_history(self._all_records)
 
     def _on_export(self):
         """导出为 Markdown。"""
@@ -737,6 +868,7 @@ class PresetCombo(QWidget):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
         self._combo = QComboBox()
         self._combo.setMinimumHeight(36)
@@ -753,16 +885,31 @@ class PresetCombo(QWidget):
         self._btn_delete.setToolTip('删除选中预设')
         layout.addWidget(self._btn_delete)
 
+        self.setMinimumHeight(36)
+
         self._combo.currentIndexChanged.connect(self._on_selected)
         self._btn_save.clicked.connect(self._on_save)
         self._btn_delete.clicked.connect(self._on_delete)
 
+        self._pm = None
         self._load_presets()
 
+    def set_manager(self, pm) -> None:
+        """设置外部 PresetManager 实例并刷新列表。"""
+        self._pm = pm
+        self._refresh_combo()
+
     def _load_presets(self):
-        """加载预设列表。"""
-        from presets import PresetManager
-        self._pm = PresetManager()
+        """加载预设列表（内部初始化用）。"""
+        if self._pm is None:
+            from presets import PresetManager
+            self._pm = PresetManager()
+        self._refresh_combo()
+
+    def _refresh_combo(self):
+        """刷新下拉框内容。"""
+        if self._pm is None:
+            return
         self._combo.blockSignals(True)
         self._combo.clear()
         self._combo.addItem('（无预设）', None)
@@ -777,6 +924,8 @@ class PresetCombo(QWidget):
         if name:
             params = self._pm.get_preset(name)
             if params:
+                params = params.copy()
+                params.pop('description', None)
                 self.preset_applied.emit(params)
 
     def _on_save(self):
@@ -786,10 +935,11 @@ class PresetCombo(QWidget):
         if ok and name.strip():
             # 发送保存请求信号（包含 __save_request__ 标记）
             self.preset_applied.emit({'__save_request__': name.strip()})
-            self._load_presets()
 
     def _on_delete(self):
         """删除选中预设。"""
+        if self._pm is None:
+            return
         name = self._combo.currentData()
         if not name:
             return
@@ -799,8 +949,11 @@ class PresetCombo(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._pm.delete_preset(name)
-            self._load_presets()
+            if self._pm.delete_preset(name):
+                self._pm.save()
+                self._refresh_combo()
+            else:
+                QMessageBox.warning(self, '提示', '内置预设不可删除。')
 
 
 # ==============================================================
@@ -877,6 +1030,12 @@ class ToolPanel(QWidget):
         # 子类别 + 工具选择
         row = QHBoxLayout()
         row.setSpacing(12)
+
+        # 与设置卡片中其它行的 70px 标签列对齐
+        cat_lbl = QLabel('工具选择')
+        cat_lbl.setObjectName('FieldLabel')
+        cat_lbl.setFixedWidth(70)
+        row.addWidget(cat_lbl)
 
         self._cat_combo = QComboBox()
         self._cat_combo.setMinimumHeight(36)

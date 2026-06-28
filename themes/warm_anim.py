@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-🔥 温暖主题动画模块（内存泄漏修复版）
+🔥 温暖主题动画模块
 
-修复点同 cute_anim.py：
-1. eventFilter 替代 paintEvent 猴子补丁
-2. stop() 显式 disconnect + deleteLater
-3. 原地过滤粒子列表
-4. __del__ 兜底
+注意：不使用 QGraphicsDropShadowEffect —— 该 API 在 PyQt6 中存在已知段错误
+（QTBUG-78410），尤其在 widget 销毁或多次 setGraphicsEffect 时触发。
+改为只在按钮 stylesheet 中用 border-radius + 颜色变化模拟"温暖呼吸"。
 """
 
 import math
 import random
 from PyQt6.QtCore import QTimer, QObject, QEvent
-from PyQt6.QtGui import QColor, QPainter, QFont, QGraphicsDropShadowEffect
+from PyQt6.QtGui import QColor, QPainter, QFont
 from PyQt6.QtWidgets import QWidget
 
 
@@ -71,7 +69,6 @@ class ThemeAnimator:
         self._timer.setInterval(80)  # 12fps，节省 CPU
         self._timer.timeout.connect(self._tick)
         self._phase = 0.0
-        self._shadow = None
         self._fireflies: list[_Firefly] = []
         self._empty_widget = None
         self._paint_filter = None
@@ -79,15 +76,6 @@ class ThemeAnimator:
 
     def start(self):
         """启动动画。"""
-        # 为主按钮添加温暖呼吸光晕
-        btn = getattr(self._window, '_start_btn', None)
-        if btn:
-            self._shadow = QGraphicsDropShadowEffect(btn)
-            self._shadow.setBlurRadius(20)
-            self._shadow.setColor(QColor(245, 158, 11, 80))
-            self._shadow.setOffset(0, 0)
-            btn.setGraphicsEffect(self._shadow)
-
         # 用 eventFilter 安装萤火虫绘制
         self._empty_widget = getattr(self._window, '_empty_state_widget', None)
         if self._empty_widget:
@@ -107,11 +95,6 @@ class ThemeAnimator:
             self._timer.timeout.disconnect(self._tick)
         except TypeError:
             pass
-
-        btn = getattr(self._window, '_start_btn', None)
-        if btn:
-            btn.setGraphicsEffect(None)
-        self._shadow = None
 
         if self._empty_widget and self._paint_filter:
             self._empty_widget.removeEventFilter(self._paint_filter)
@@ -136,13 +119,6 @@ class ThemeAnimator:
         if not self._alive:
             return
         self._phase += 0.05
-
-        # 温暖呼吸光晕
-        alpha = int(100 + 50 * math.sin(self._phase))
-        blur = int(18 + 8 * math.sin(self._phase * 0.8))
-        if self._shadow:
-            self._shadow.setBlurRadius(blur)
-            self._shadow.setColor(QColor(245, 158, 11, alpha))
 
         # 萤火虫生成（只在空状态可见时）
         if self._empty_widget and self._empty_widget.isVisible():

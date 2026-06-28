@@ -20,16 +20,11 @@ from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal, QSemaphore
 
-from engines import (
-    convert_video,
-    convert_audio,
-    convert_image,
-    convert_pdf_to_docx,
-    convert_docx_to_pdf,
-    convert_excel_to_image,
-)
 from engines.gpu_scheduler import GpuScheduler
+from execution_registry import execute_task
+from task_models import TaskSpec
 from utils import CREATE_NO_WINDOW, kill_process_tree
+from monitor import trace, monitor_log
 
 
 # ==============================================================
@@ -125,6 +120,9 @@ class ConversionWorker(QThread):
         """执行转换任务（在子线程中运行），保证终态必达。"""
         import time as _time
         self._start_time = _time.monotonic()
+        trace('worker.run.start', row=self.file_index,
+              input=self.input_path, output=self.output_path,
+              conv=self.conv_type, tid=threading.get_ident())
 
         # 如果队列暂停了，等待恢复
         if self._orchestrator_pause:
@@ -136,11 +134,15 @@ class ConversionWorker(QThread):
         self._transition_to(WorkerState.RUNNING)
         self.status_updated.emit(self.file_index, FileStatus.CONVERTING)
         self.progress_updated.emit(self.file_index, 0)
+        trace('worker.state', row=self.file_index, state='RUNNING')
 
         status = FileStatus.FAILED  # 默认值，正常路径会覆盖
 
         try:
             result_path = self._do_convert()
+            trace('worker.convert.done', row=self.file_index,
+                  result=result_path, exists=os.path.isfile(result_path) if result_path else False,
+                  cancelled=self._cancel_event.is_set())
 
             if self._cancel_event.is_set():
                 self._transition_to(WorkerState.CANCELLING)
@@ -154,6 +156,8 @@ class ConversionWorker(QThread):
                 raise RuntimeError('输出文件未生成')
 
         except Exception as e:
+            trace('worker.convert.error', row=self.file_index,
+                  error=repr(e), cancelled=self._cancel_event.is_set())
             self._transition_to(WorkerState.ERROR)
             if self._cancel_event.is_set():
                 status = FileStatus.CANCELLED
@@ -168,14 +172,18 @@ class ConversionWorker(QThread):
                 self._gpu_scheduler.release_encoder()
             # 终态：必须发射信号（且仅一次）
             self._transition_to(WorkerState.TERMINAL)
+            trace('worker.state', row=self.file_index, state='TERMINAL', status=status)
             if not self._finished_emitted:
                 success = (status == FileStatus.SUCCESS)
                 msg = self._get_status_message(status)
+                trace('worker.emit.finished_one', row=self.file_index,
+                      success=success, msg=msg)
                 self.finished_one.emit(self.file_index, success, msg)
                 self._finished_emitted = True
 
             if self._semaphore:
                 self._semaphore.release()
+            trace('worker.run.exit', row=self.file_index)
 
     def _get_status_message(self, status: str) -> str:
         """根据状态返回用户友好的消息。"""
@@ -206,17 +214,21 @@ class ConversionWorker(QThread):
         """
         with self._state_lock:
             if self._state in (WorkerState.CANCELLING, WorkerState.TERMINAL):
+                trace('worker.cancel.skip', row=self.file_index, state=str(self._state))
                 return  # 已取消或已结束，忽略
             if self._state == WorkerState.RUNNING:
                 self._state = WorkerState.CANCELLING
 
+        trace('worker.cancel', row=self.file_index)
         self._cancel_event.set()
 
         # 杀死子进程
         if self._proc_handle is not None:
+            trace('worker.cancel.kill_proc', row=self.file_index)
             try:
                 kill_process_tree(self._proc_handle)
-            except Exception:
+            except Exception as e:
+                trace('worker.cancel.kill_failed', row=self.file_index, error=repr(e))
                 pass  # 进程可能已退出
 
     # ----------------------------------------------------------
@@ -225,183 +237,24 @@ class ConversionWorker(QThread):
 
     def _do_convert(self) -> str:
         """根据类型派发到具体引擎。"""
-        conv_type = self.conv_type
         proc_ref = []  # 可变容器，引擎函数将 Popen 对象追加到此列表
-        result_path = None
-
-        if conv_type == 'video':
-            result_path = convert_video(
-                self.input_path,
-                self.output_path,
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-                params=self._settings,  # N-09: 传递高级设置
-            )
-        elif conv_type == 'audio':
-            result_path = convert_audio(
-                self.input_path,
-                self.output_path,
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-                params=self._settings,  # N-09: 传递高级设置
-            )
-        elif conv_type == 'image':
-            result_path = convert_image(
-                self.input_path,
-                self.output_path,
-                params=self._settings,  # N-09: 传递高级设置
-            )
-        elif conv_type == 'pdf_to_docx':
-            result_path = convert_pdf_to_docx(self.input_path, self.output_path)
-        elif conv_type == 'docx_to_pdf':
-            result_path = convert_docx_to_pdf(self.input_path, self.output_path)
-        elif conv_type == 'excel_to_image':
-            result_path = convert_excel_to_image(
-                self.input_path,
-                self.output_path,
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-            )
-        elif conv_type == 'embed_subtitle':
-            from engines.ffmpeg_utils import embed_subtitle
-            result_path = embed_subtitle(
-                self.input_path,
-                self.output_path,
-                subtitle_path=self._settings.get('subtitle_path', ''),
-                language=self._settings.get('language', 'chi'),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'extract_subtitle':
-            from engines.ffmpeg_utils import extract_subtitle
-            result_path = extract_subtitle(self.input_path, self.output_path)
-        elif conv_type == 'extract_audio':
-            from engines import extract_audio
-            result_path = extract_audio(
-                self.input_path,
-                self.output_path,
-                format=self._settings.get('format', 'mp3'),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'merge_media':
-            from engines.ffmpeg_utils import merge_media
-            merge_paths = self._settings.get('merge_paths', [])
-            # [RISK-05 修复] 防御性校验：至少需要 2 个文件
-            if len(merge_paths) < 2:
-                raise ValueError(
-                    f'合并至少需要 2 个文件，当前只有 {len(merge_paths)} 个'
-                )
-            result_path = merge_media(
-                merge_paths,
-                self.output_path,
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'crop_video':
-            from engines.ffmpeg_utils import crop_video
-            # [RISK-06 修复] 默认值 0 表示动态探测源视频尺寸
-            crop_w = self._settings.get('crop_w', 0)
-            crop_h = self._settings.get('crop_h', 0)
-            if crop_w <= 0 or crop_h <= 0:
-                from engines.ffmpeg_utils import _probe_video_info
-                info = _probe_video_info(self.input_path)
-                if crop_w <= 0:
-                    crop_w = info.get('width', 1920)
-                if crop_h <= 0:
-                    crop_h = info.get('height', 1080)
-            result_path = crop_video(
-                self.input_path,
-                self.output_path,
-                width=crop_w,
-                height=crop_h,
-                x=self._settings.get('crop_x', 0),
-                y=self._settings.get('crop_y', 0),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'trim_media':
-            from engines import trim_media
-            result_path = trim_media(
-                self.input_path,
-                self.output_path,
-                start_time=self._settings.get('start_time', '00:00:00'),
-                end_time=self._settings.get('end_time', '00:01:00'),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'compress_video':
-            from engines import compress_video
-            result_path = compress_video(
-                self.input_path,
-                self.output_path,
-                target_size_mb=self._settings.get('target_size_mb', 0),
-                crf=self._settings.get('crf', 28),
-                scale_width=self._settings.get('scale_width', 0),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        elif conv_type == 'compress_image':
-            from engines import compress_image
-            result_path = compress_image(
-                self.input_path,
-                self.output_path,
-                target_size_kb=self._settings.get('target_size_kb', 0),
-                quality=self._settings.get('quality', 80),
-            )
-            if result_path:
-                self.progress_updated.emit(self.file_index, 100)
-        elif conv_type == 'resize_image':
-            from engines import resize_image
-            result_path = resize_image(
-                self.input_path,
-                self.output_path,
-                width=self._settings.get('width', 0),
-                height=self._settings.get('height', 0),
-                percentage=self._settings.get('percentage', 0),
-                max_dimension=self._settings.get('max_dimension', 0),
-                quality=self._settings.get('image_quality', 95),
-            )
-            if result_path:
-                self.progress_updated.emit(self.file_index, 100)
-        elif conv_type == 'add_watermark':
-            from engines import add_watermark
-            result_path = add_watermark(
-                self.input_path,
-                self.output_path,
-                text=self._settings.get('text', ''),
-                position=self._settings.get('position', 'bottom-right'),
-                opacity=self._settings.get('opacity', 0.5),
-                font_size=self._settings.get('font_size', 24),
-            )
-            if result_path:
-                self.progress_updated.emit(self.file_index, 100)
-        elif conv_type == 'video_to_gif':
-            from engines import convert_video_to_gif
-            result_path = convert_video_to_gif(
-                self.input_path,
-                self.output_path,
-                fps=self._settings.get('fps', 12),
-                width=self._settings.get('width', 480),
-                colors=self._settings.get('colors', 256),
-                progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
-                cancel_event=self._cancel_event,
-                proc_ref=proc_ref,
-            )
-        else:
-            raise ValueError(f'不支持的转换类型: {conv_type}')
+        task = TaskSpec(
+            key=self.conv_type,
+            input_path=self.input_path,
+            output_path=self.output_path,
+            params=self._settings.copy(),
+        )
+        result = execute_task(
+            task,
+            progress_callback=lambda p: self.progress_updated.emit(self.file_index, p),
+            cancel_event=self._cancel_event,
+            proc_ref=proc_ref,
+        )
 
         # 将引擎进程句柄同步到 worker，以便 cancel() 能杀死它
         if proc_ref:
             self._proc_handle = proc_ref[0]
-        return result_path
+        return result.output_path or ''
 
 
 # ==============================================================
@@ -469,17 +322,14 @@ class BatchOrchestrator:
 
     def wait_all(self, timeout_ms: int = 5000) -> None:
         """
-        等待所有工作线程退出，超时则强杀。
+        等待所有工作线程退出，超时则保留运行态交由上层继续处理。
 
-        [STRESS-02 修复] terminate 后二次 wait，
-        确保 semaphore 彻底释放，防止重试时死锁。
+        避免使用 QThread.terminate() 硬杀线程，防止 Qt/Python 状态损坏。
         """
         for worker in self.workers:
             if worker.isRunning():
-                worker.cancel()                      # 先杀子进程树
-                if not worker.wait(timeout_ms):      # 等待线程退出
-                    worker.terminate()               # 超时 → 强制终止
-                    worker.wait(2000)                # 二次 wait 确保退出
+                worker.cancel()
+                worker.wait(timeout_ms)
 
     def active_count(self) -> int:
         """当前正在运行的线程数。"""

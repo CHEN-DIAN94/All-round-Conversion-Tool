@@ -11,22 +11,53 @@ import os
 import time
 from pathlib import Path
 
+from logging_config import get_logger
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QProgressBar, QFileDialog, QMessageBox
 
-from workers import ConversionWorker, FileStatus, BatchOrchestrator
+from workers import ConversionWorker, BatchOrchestrator
+from constants import FileStatus
 from formats import COL_FILE_NAME, COL_STATUS, COL_PROGRESS
+from utils import CREATE_NO_WINDOW
+from monitor import trace
+
+logger = get_logger(__name__)
 
 
 class ConversionMixin:
     """转换控制 mixin。"""
 
     _cancel_in_progress: bool = False  # [STRESS-02 修复] 取消中标志
+    _active_batch_id: int = 0
 
     def _on_start_all(self, retry_rows: list = None) -> None:
         """全部开始转换。retry_rows 指定时只重试指定行。"""
+        if isinstance(retry_rows, bool):
+            retry_rows = None
+
         row_count = self._table.rowCount()
         if row_count == 0:
             return
+        trace('start_all.enter', rows=row_count, retry=bool(retry_rows))
+
+        try:
+            self._do_start_all(retry_rows, row_count)
+        except Exception as e:
+            import traceback as _tb
+            from monitor import monitor_log
+            monitor_log(f'!!! _on_start_all crashed !!!\n{_tb.format_exc()}')
+            trace('start_all.crash', error=repr(e))
+            # 恢复 UI 状态
+            try:
+                self._is_converting = False
+                self._set_controls_enabled(True)
+                self._status_bar.showMessage(f'启动转换时出错: {e}', 5000)
+            except Exception:
+                pass
+
+    def _do_start_all(self, retry_rows: list = None, row_count: int = 0) -> None:
+        """实际执行转换启动逻辑。"""
 
         # 判断是否在工具模式
         is_tools = False
@@ -36,7 +67,24 @@ class ConversionMixin:
                 break
 
         if is_tools:
+            trace('start_all.tools_mode')
             self._run_tool(retry_rows)
+            return
+
+        # FFmpeg 可用性检查（视频/音频类别必需）
+        fmt_data_preview = self._format_combo.currentData()
+        need_ffmpeg = True
+        if fmt_data_preview:
+            _, category_key = fmt_data_preview
+            # 文档/表格类别不需要 ffmpeg
+            need_ffmpeg = category_key not in ('document', 'spreadsheet')
+        if need_ffmpeg and not getattr(self, '_ffmpeg_available', True):
+            QMessageBox.critical(
+                self, 'FFmpeg 不可用',
+                '未检测到 FFmpeg，视频/音频/图片转换无法进行。\n\n'
+                '请将 ffmpeg.exe 放入程序目录的 bin/ 文件夹，\n'
+                '或将其加入系统 PATH 后重启程序。',
+            )
             return
 
         # 校验文件存在性
@@ -59,15 +107,20 @@ class ConversionMixin:
             )
             return
 
+        trace('start_all.check_files_done', valid=len(valid_files))
+
         fmt_data = self._format_combo.currentData()
         if not fmt_data:
             QMessageBox.warning(self, '提示', '请先选择输出格式。')
             return
         output_ext, category_key = fmt_data
+        trace('start_all.fmt', ext=output_ext, cat=category_key)
 
         # 重置状态（仅处理目标行）
         for row in check_rows:
-            self._table.item(row, COL_STATUS).setText(FileStatus.WAITING)
+            status_item = self._table.item(row, COL_STATUS)
+            if status_item:
+                status_item.setText(FileStatus.WAITING)
             progress_bar = self._table.cellWidget(row, COL_PROGRESS)
             if isinstance(progress_bar, QProgressBar):
                 progress_bar.setValue(0)
@@ -78,25 +131,41 @@ class ConversionMixin:
         # 创建 worker
         workers = []
         for row in check_rows:
-            input_path = self._table.item(row, COL_FILE_NAME).data(
-                Qt.ItemDataRole.UserRole)
+            name_item = self._table.item(row, COL_FILE_NAME)
+            status_item = self._table.item(row, COL_STATUS)
+            if not name_item:
+                continue
+            input_path = name_item.data(Qt.ItemDataRole.UserRole)
             if not input_path or input_path not in valid_files:
-                self._table.item(row, COL_STATUS).setText(FileStatus.FAILED)
+                if status_item:
+                    status_item.setText(FileStatus.FAILED)
                 continue
 
-            output_path = self._generate_output_path(input_path, output_ext)
-            conv_type = self._determine_conv_type(input_path, output_ext)
+            try:
+                trace('start_all.gen_path', row=row, input=input_path)
+                output_path = self._generate_output_path(input_path, output_ext)
+                trace('start_all.gen_path_done', row=row, output=output_path)
+                conv_type = self._determine_conv_type(input_path, output_ext)
+                trace('start_all.conv_type', row=row, conv=conv_type)
+            except Exception as e:
+                trace('start_all.gen_path_err', row=row, error=repr(e))
+                if status_item:
+                    status_item.setText(FileStatus.FAILED)
+                    status_item.setToolTip(str(e))
+                continue
 
             if conv_type is None:
-                self._table.item(row, COL_STATUS).setText(FileStatus.FAILED)
+                if status_item:
+                    status_item.setText(FileStatus.FAILED)
                 input_ext = Path(input_path).suffix.lower()
                 if input_ext == '.doc' and output_ext == '.pdf':
                     tip = '旧版 .doc 格式不支持直接转换，请先用 Word 另存为 .docx'
                 else:
                     tip = f'不支持的转换: {Path(input_path).suffix} -> {output_ext}'
-                self._table.item(row, COL_FILE_NAME).setToolTip(tip)
+                name_item.setToolTip(tip)
                 continue
 
+            trace('start_all.create_worker', row=row, conv=conv_type)
             worker = ConversionWorker(
                 row, input_path, output_path, conv_type,
                 settings=self._advanced_settings,
@@ -105,19 +174,37 @@ class ConversionMixin:
             worker.progress_updated.connect(self._on_progress_updated)
             worker.finished_one.connect(self._on_task_finished)
             workers.append(worker)
+            trace('start_all.worker_created', row=row)
 
         if not workers:
+            trace('start_all.no_workers')
             return
+
+        # 磁盘空间检查：输出目录剩余空间 < 100MB 时警告
+        from utils import get_disk_free
+        sample_output = workers[0].output_path
+        free_bytes = get_disk_free(sample_output)
+        if free_bytes >= 0 and free_bytes < 100 * 1024 * 1024:
+            free_mb = free_bytes / (1024 * 1024)
+            QMessageBox.warning(
+                self, '磁盘空间不足',
+                f'输出目录所在磁盘剩余空间仅 {free_mb:.1f} MB，\n'
+                f'可能导致转换失败。建议先清理磁盘空间。',
+            )
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         if category_key in ('document', 'spreadsheet'):
             from PyQt6.QtCore import QSemaphore
             self._orchestrator = BatchOrchestrator(max_concurrency=1)
         else:
             self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
+        trace('start_all.orch_ready', workers=len(workers), batch=current_batch_id)
 
         self._is_converting = True
         self._start_time = time.monotonic()
@@ -129,7 +216,9 @@ class ConversionMixin:
         self._progress_label.setText(f'0 / {len(workers)}')
         self._status_bar.showMessage(f'正在转换 {len(workers)} 个文件...')
 
+        trace('start_all.orch_start')
         self._orchestrator.start_all()
+        trace('start_all.orch_started')
 
     def _run_tool(self, retry_rows: list = None) -> None:
         """执行工具模式。"""
@@ -234,8 +323,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator(max_concurrency=1)
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -264,8 +356,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator(max_concurrency=1)
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -301,6 +396,8 @@ class ConversionMixin:
         worker.finished_one.connect(self._on_task_finished)
         self._workers = [worker]
         self._total_workers = 1
+        self._active_batch_id += 1
+        worker._batch_id = self._active_batch_id
         self._completed_count = 0
         self._orchestrator = BatchOrchestrator(max_concurrency=1)
         self._orchestrator.add_worker(worker)
@@ -333,8 +430,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for wk in workers:
+            wk._batch_id = current_batch_id
             self._orchestrator.add_worker(wk)
 
         self._progress_bar.setMaximum(len(workers))
@@ -366,8 +466,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -408,8 +511,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -447,8 +553,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -484,8 +593,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator(max_concurrency=1)
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -563,13 +675,13 @@ class ConversionMixin:
         dialog.exec()
 
     def _tool_compress_image(self, file_paths: list, params: dict) -> None:
-        """图片压缩（同步执行，速度快）。"""
-        from engines import compress_image
-
+        """图片压缩。"""
         quality = params.get('quality', 80)
         target_size_kb = params.get('target_size_kb', 0)
 
         self._is_converting = True
+        self._start_time = time.monotonic()
+        self._completed_count = 0
         self._set_controls_enabled(False)
         self._status_bar.showMessage(f'正在压缩 {len(file_paths)} 张图片...')
 
@@ -590,10 +702,11 @@ class ConversionMixin:
 
         self._workers = workers
         self._total_workers = len(workers)
-        self._start_time = time.monotonic()
-        self._completed_count = 0
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -622,8 +735,11 @@ class ConversionMixin:
         self._set_controls_enabled(False)
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -653,8 +769,11 @@ class ConversionMixin:
         self._set_controls_enabled(False)
         self._workers = workers
         self._total_workers = len(workers)
+        self._active_batch_id += 1
+        current_batch_id = self._active_batch_id
         self._orchestrator = BatchOrchestrator()
         for w in workers:
+            w._batch_id = current_batch_id
             self._orchestrator.add_worker(w)
 
         self._progress_bar.setMaximum(len(workers))
@@ -747,68 +866,12 @@ class ConversionMixin:
         except Exception as e:
             QMessageBox.critical(self, '转换失败', str(e))
 
-    def _on_undo_remove(self) -> None:
-        """撤销上次移除操作（Ctrl+Z）。"""
-        if hasattr(self, '_removed_rows_cache') and self._removed_rows_cache:
-            # 恢复最后移除的行
-            pass  # TODO: 实现完整的撤销栈
-
-    def _on_save_project(self) -> None:
-        """保存项目文件（Ctrl+S）。"""
-        try:
-            from project import ProjectFile
-            from PyQt6.QtWidgets import QFileDialog
-            path, _ = QFileDialog.getSaveFileName(
-                self, '保存项目', 'project.lgp',
-                '流光项目 (*.lgp);;所有文件 (*.*)',
-            )
-            if path:
-                pf = ProjectFile(
-                    files=[self._table.item(r, 0).data(Qt.ItemDataRole.UserRole)
-                           for r in range(self._table.rowCount())
-                           if self._table.item(r, 0)],
-                    output_dir=getattr(self, '_output_dir', ''),
-                )
-                pf.save(path)
-                self._status_bar.showMessage(f'项目已保存: {path}')
-        except Exception as e:
-            self._status_bar.showMessage(f'保存失败: {e}')
-
-    def _on_open_project(self) -> None:
-        """打开项目文件（Ctrl+Shift+O）。"""
-        try:
-            from project import ProjectFile
-            from PyQt6.QtWidgets import QFileDialog, QMessageBox
-            path, _ = QFileDialog.getOpenFileName(
-                self, '打开项目', '',
-                '流光项目 (*.lgp);;所有文件 (*.*)',
-            )
-            if not path:
-                return
-            pf = ProjectFile.load(path)
-            missing = pf.get_missing_files()
-            if missing:
-                QMessageBox.warning(
-                    self, '文件丢失',
-                    f'{len(missing)} 个文件已丢失，将跳过：\n\n'
-                    + '\n'.join(os.path.basename(f) for f in missing[:5])
-                    + ('...' if len(missing) > 5 else ''),
-                )
-            valid_files = pf.get_valid_files()
-            if valid_files:
-                self.add_files_to_table(valid_files)
-            self._status_bar.showMessage(
-                f'项目已加载: {path}（{len(valid_files)} 个文件）')
-        except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, '打开失败', f'无法打开项目文件:\n{e}')
-
     def _on_export_ffmpeg_cmd_shortcut(self) -> None:
         """导出 FFmpeg 命令（Ctrl+E）。"""
         # 复用工具面板的导出功能
         file_paths = []
         for row in range(self._table.rowCount()):
-            item = self._table.item(row, 0)
+            item = self._table.item(row, COL_FILE_NAME)
             if item:
                 fp = item.data(Qt.ItemDataRole.UserRole)
                 if fp:
@@ -843,18 +906,33 @@ class ConversionMixin:
             self._status_bar.showMessage('队列已暂停（当前任务继续完成，新任务等待中）')
 
     def _on_cancel(self) -> None:
-        """取消所有转换。[STRESS-01/02 修复] cancel 后 wait_all 确保线程退出。"""
+        """取消所有转换。避免在 UI 线程同步阻塞等待。"""
         if not self._orchestrator:
             return
+        trace('cancel.enter', workers=len(self._workers))
         self._cancel_in_progress = True
         self._status_bar.showMessage('正在取消...')
         self._set_controls_enabled(False)
+        self._progress_bar.setMaximum(0)
         self._orchestrator.cancel_all()
-        self._orchestrator.wait_all(timeout_ms=8000)
-        self._cancel_in_progress = False
-        self._is_converting = False
-        self._set_controls_enabled(True)
-        self._status_bar.showMessage('已取消所有转换')
+        for worker in self._workers:
+            if not worker.isRunning():
+                status_item = self._table.item(worker.file_index, COL_STATUS)
+                if status_item and status_item.text() == FileStatus.WAITING:
+                    status_item.setText(FileStatus.CANCELLED)
+                    self._completed_count += 1
+
+        if self._completed_count >= self._total_workers:
+            self._cancel_in_progress = False
+            self._is_converting = False
+            self._set_controls_enabled(True)
+            self._progress_bar.setMaximum(100)
+            self._progress_bar.setValue(0)
+            self._status_bar.showMessage('已取消所有转换')
+            if self._orchestrator:
+                self._orchestrator.clear_all()
+            self._workers = []
+            self._update_start_button()
 
     def _on_status_updated(self, file_index: int, status: str) -> None:
         """更新状态列。"""
@@ -872,6 +950,22 @@ class ConversionMixin:
 
     def _on_task_finished(self, file_index: int, success: bool, message: str) -> None:
         """单个任务完成。"""
+        trace('task_finished.enter', row=file_index, success=success, msg=message[:80])
+        matching_worker = None
+        for worker in self._workers:
+            if worker.file_index == file_index:
+                matching_worker = worker
+                break
+
+        # 找不到对应 worker 时，说明是过期信号，直接忽略
+        if matching_worker is None:
+            trace('task_finished.stale', row=file_index, reason='no_matching_worker')
+            return
+
+        worker_batch_id = getattr(matching_worker, '_batch_id', 0)
+        if worker_batch_id != self._active_batch_id:
+            return
+
         if 0 <= file_index < self._table.rowCount():
             status_item = self._table.item(file_index, COL_STATUS)
             name_item = self._table.item(file_index, COL_FILE_NAME)
@@ -935,6 +1029,19 @@ class ConversionMixin:
             else:
                 self._status_bar.showMessage(f'已完成 {completed}/{total} 个文件')
 
+        if self._cancel_in_progress and completed >= total:
+            self._cancel_in_progress = False
+            self._is_converting = False
+            self._set_controls_enabled(True)
+            self._progress_bar.setMaximum(100)
+            self._progress_bar.setValue(0)
+            self._status_bar.showMessage('已取消所有转换')
+            if self._orchestrator:
+                self._orchestrator.clear_all()
+            self._workers = []
+            self._update_start_button()
+            return
+
         # 全部完成检查（以计数器为准，消除竞态）
         if self._is_converting and completed >= total:
             self._on_all_finished()
@@ -944,6 +1051,7 @@ class ConversionMixin:
         if not self._is_converting:
             return  # 防止重复调用
         self._is_converting = False
+        trace('all_finished.enter')
         # [STRESS-02 修复] 确保所有线程已退出后再清理
         if self._orchestrator:
             self._orchestrator.wait_all(timeout_ms=5000)
@@ -977,15 +1085,94 @@ class ConversionMixin:
                 msg + '\n\n双击失败的文件行可查看具体错误原因。',
             )
 
-        self._workers.clear()
-        self._orchestrator.clear_all()
+        finished_workers = list(self._workers)
+        self._workers = []
+        if self._orchestrator:
+            self._orchestrator.clear_all()
         self._update_start_button()
 
         # [P0-1.4] Toast 通知 + 打开输出目录
         if success > 0:
-            self._show_completion_toast(success, failed, cancelled, elapsed)
+            self._show_completion_toast(success, failed, cancelled, elapsed, finished_workers)
 
-    def _show_completion_toast(self, success: int, failed: int, cancelled: int, elapsed: float) -> None:
+        # 转换完成后操作（用户选择）
+        self._perform_post_action(success, failed, finished_workers)
+
+    def _perform_post_action(self, success: int, failed: int, finished_workers: list) -> None:
+        """执行用户选择的转换完成后操作。"""
+        if not hasattr(self, '_post_action_combo'):
+            return
+        action = self._post_action_combo.currentData()
+        if not action or action == 'none':
+            return
+
+        # 至少有一个成功才执行（避免失败后还执行关机）
+        if success == 0:
+            return
+
+        if action == 'open_dir':
+            # 打开输出目录
+            self._on_open_output_dir()
+
+        elif action == 'delete_src':
+            # 删除原文件（仅删除转换成功的）
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, '确认删除原文件',
+                f'转换已完成（成功 {success} 个）。\n\n'
+                f'确定要删除成功转换的原文件吗？\n'
+                f'此操作不可撤销！',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            deleted = 0
+            for w in finished_workers:
+                # 仅删除状态为成功的
+                row = w.file_index
+                status_item = self._table.item(row, COL_STATUS)
+                if status_item and status_item.text() == FileStatus.SUCCESS:
+                    try:
+                        os.remove(w.input_path)
+                        deleted += 1
+                    except OSError:
+                        pass
+            self._status_bar.showMessage(f'已删除 {deleted} 个原文件', 5000)
+
+        elif action == 'shutdown':
+            # 关机（1 分钟后）
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, '确认关机',
+                f'转换已完成（成功 {success} 个）。\n\n'
+                f'确定要关闭计算机吗？\n'
+                f'系统将在 60 秒后关机，可在此期间取消。',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            import sys
+            if sys.platform == 'win32':
+                import subprocess
+                # shutdown /s /t 60：60 秒后关机，可用 shutdown /a 取消
+                subprocess.Popen(
+                    ['shutdown', '/s', '/t', '60'],
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                QMessageBox.information(
+                    self, '关机已计划',
+                    '系统将在 60 秒后关机。\n'
+                    '如需取消，请打开命令行执行：shutdown /a',
+                )
+            else:
+                QMessageBox.information(
+                    self, '提示',
+                    '关机功能仅支持 Windows。',
+                )
+
+    def _show_completion_toast(self, success: int, failed: int, cancelled: int, elapsed: float, finished_workers: list | None = None) -> None:
         """转换完成后的即时反馈：Toast 通知 + 打开输出目录按钮。"""
         import sys
         mins, secs = divmod(int(elapsed), 60)
@@ -1009,9 +1196,10 @@ class ConversionMixin:
 
         # 在状态栏显示"打开输出目录"快捷操作
         output_dir = getattr(self, '_output_dir', '')
+        source_workers = finished_workers or getattr(self, '_workers', [])
         if not output_dir:
             # 从第一个成功的 worker 获取输出目录
-            for w in getattr(self, '_workers', []):
+            for w in source_workers:
                 if hasattr(w, 'output_path') and w.output_path:
                     output_dir = str(Path(w.output_path).parent)
                     break
@@ -1020,8 +1208,8 @@ class ConversionMixin:
                 f'{body}  📂 输出目录: {output_dir}  '
                 f'（点击状态栏打开）'
             )
-            # 让状态栏可点击打开目录
-            self._status_bar.mousePressEvent = lambda e: self._open_output_dir_toast(output_dir)
+            # 保存当前输出目录引用，供状态栏点击使用（不覆盖 mousePressEvent）
+            self._last_output_dir = output_dir
 
     def _open_output_dir_toast(self, output_dir: str) -> None:
         """点击状态栏打开输出目录。"""
@@ -1068,6 +1256,13 @@ class ConversionMixin:
         ver = get_ffmpeg_version()
         if not ver:
             self._status_bar.showMessage('⚠ FFmpeg 未检测到，视频/音频转换将不可用')
+            self._ffmpeg_available = False
+        else:
+            self._ffmpeg_available = True
+            # 状态栏显示版本前缀
+            short_ver = ver.split('\n')[0] if ver else ''
+            if short_ver:
+                self._status_bar.showMessage(f'就绪 · {short_ver}', 3000)
 
     def _on_retry_failed(self) -> None:
         """重试所有失败的文件。"""

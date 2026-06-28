@@ -30,10 +30,8 @@ logs/
 crash*.log
 crash_dump.log
 
-# PyInstaller
-*.spec
+# Build artifacts
 *.exe
-build/
 
 # 二进制工具
 bin/

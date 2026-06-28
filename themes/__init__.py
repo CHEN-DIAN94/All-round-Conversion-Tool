@@ -9,6 +9,8 @@ import importlib
 from pathlib import Path
 import logging
 
+from monitor import trace
+
 _logger = logging.getLogger(__name__)
 
 THEMES_DIR = Path(__file__).resolve().parent
@@ -68,12 +70,14 @@ def activate_animation(theme_key: str, window) -> None:
         window: MainWindow 实例
     """
     global _current_animator
+    trace('theme.anim.activate', theme=theme_key, has_old=_current_animator is not None)
 
     # 停止旧动画
     stop_current_animation()
 
     info = THEMES.get(theme_key)
     if not info or not info[3]:
+        trace('theme.anim.no_anim', theme=theme_key)
         return
 
     anim_module_name = info[3]
@@ -83,7 +87,9 @@ def activate_animation(theme_key: str, window) -> None:
         animator = module.ThemeAnimator(window)
         animator.start()
         _current_animator = animator
+        trace('theme.anim.started', theme=theme_key, module=anim_module_name)
     except (ImportError, AttributeError, Exception) as e:
+        trace('theme.anim.load_failed', theme=theme_key, module=anim_module_name, error=repr(e))
         _logger.warning('动画加载失败 (%s): %s', anim_module_name, e)
 
 
@@ -91,8 +97,10 @@ def stop_current_animation() -> None:
     """停止当前活跃的动画。释放全局引用，让 GC 回收。"""
     global _current_animator
     if _current_animator is not None:
+        trace('theme.anim.stop')
         try:
             _current_animator.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            trace('theme.anim.stop_failed', error=repr(e))
         _current_animator = None  # 释放引用，触发 animator.__del__
+        trace('theme.anim.stopped')

@@ -30,7 +30,6 @@ QMainWindow, #CentralWidget {
     font-size: 9.5pt;
     color: #999;
     padding: 0;
-    letter-spacing: 1px;
 }
 
 /* ---------- 设置卡片 ---------- */
@@ -43,7 +42,6 @@ QMainWindow, #CentralWidget {
     color: #666;
     font-size: 9.5pt;
     font-weight: 600;
-    letter-spacing: 0.5px;
 }
 #SectionTitle {
     font-size: 11pt;
@@ -180,6 +178,7 @@ QComboBox {
     border: 1px solid #ddd;
     border-radius: 8px;
     padding: 6px 12px;
+    min-height: 36px;
     color: #333;
     selection-background-color: #007aff;
     selection-color: #fff;
@@ -216,6 +215,28 @@ QComboBox QAbstractItemView::item {
     min-height: 24px;
 }
 
+/* ---------- 高级设置 / 预览面板 ---------- */
+#AdvancedSettings {
+    background-color: #fafafa;
+    border: 1px solid #e5e5e5;
+    border-radius: 14px;
+}
+#PreviewPanel {
+    background-color: #fafafa;
+    border: 1px solid #e5e5e5;
+    border-radius: 14px;
+}
+#PreviewLabel[previewState="empty"] {
+    color: #ccc;
+}
+#PreviewLabel[previewState="icon"] {
+    color: #888;
+}
+#PreviewInfo {
+    color: #999;
+    font-size: 9pt;
+}
+
 /* ---------- 表格 ---------- */
 QTableWidget#FileTable {
     background-color: #ffffff;
@@ -243,7 +264,6 @@ QHeaderView::section {
     border-bottom: 1px solid #e5e5e5;
     font-weight: 700;
     font-size: 9pt;
-    letter-spacing: 0.5px;
 }
 QHeaderView::section:first {
     border-top-left-radius: 12px;
@@ -283,7 +303,6 @@ QProgressBar#OverallProgress::chunk {
 #ProgressCount {
     color: #888;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
     font-size: 10pt;
 }
 
@@ -416,6 +435,7 @@ QSpinBox, QSlider {
     background-color: #f5f5f7;
     border: 1px solid #ddd;
     border-radius: 6px;
+    min-height: 36px;
     color: #333;
     padding: 4px 8px;
 }

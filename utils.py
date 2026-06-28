@@ -4,10 +4,11 @@ utils.py — 底层工具函数
 """
 
 
-__all__ = ['get_resource_path', 'get_ffmpeg_path', 'get_ffprobe_path', 'get_ffmpeg_version', 'run_subprocess', 'run_subprocess_popen', 'kill_process_tree', 'ProcessContext', 'safe_temp_path', 'finalize_file', 'get_file_size_str', 'ensure_output_dir', 'map_format_to_category', 'CREATE_NO_WINDOW']
+__all__ = ['get_resource_path', 'get_ffmpeg_path', 'get_ffprobe_path', 'get_ffmpeg_version', 'run_subprocess', 'run_subprocess_popen', 'kill_process_tree', 'ProcessContext', 'safe_temp_path', 'finalize_file', 'get_file_size_str', 'ensure_output_dir', 'map_format_to_category', 'CREATE_NO_WINDOW', 'get_disk_free']
 
 import sys
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -84,6 +85,28 @@ def get_ffmpeg_version() -> str:
         return first_line[:50] if first_line else ''
     except Exception:
         return ''
+
+
+def get_disk_free(path: str) -> int:
+    """
+    获取指定路径所在磁盘的剩余空间（字节）。
+
+    Args:
+        path: 任意路径（文件或目录）。不存在时取其父目录。
+
+    Returns:
+        剩余字节数；获取失败返回 -1。
+    """
+    if not path:
+        return -1
+    # 找到真实存在的祖先目录
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    try:
+        return shutil.disk_usage(str(p)).free
+    except OSError:
+        return -1
 
 
 def run_subprocess(args: list, **kwargs) -> subprocess.CompletedProcess:

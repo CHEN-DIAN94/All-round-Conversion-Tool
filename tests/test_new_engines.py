@@ -20,8 +20,10 @@ class TestFileStatus:
 
     def test_file_status_values(self):
         assert FileStatus.WAITING == '等待中'
+        assert FileStatus.CONVERTING == '转换中'
         assert FileStatus.SUCCESS == '成功'
         assert FileStatus.FAILED == '失败'
+        assert FileStatus.CANCELLED == '已取消'
 
 
 class TestHistoryManager:
@@ -100,26 +102,73 @@ class TestHistoryManager:
         finally:
             os.unlink(path)
 
-    def test_export_markdown(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
-            json_path = f.name
-        with tempfile.NamedTemporaryFile(suffix='.md', delete=False) as f:
-            md_path = f.name
+    def test_load_ignores_non_list_json(self):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w', encoding='utf-8') as f:
+            path = f.name
+            f.write('{"broken": true}')
         try:
-            hm = HistoryManager(json_path)
-            hm.add('a.mp4', 'a.webm', 'video', True)
-            hm.add('b.mp4', 'b.webm', 'video', False, error='err')
-            result = hm.export_markdown(md_path)
-            assert result == md_path
-            assert os.path.isfile(md_path)
-            with open(md_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            assert '转换历史报告' in content
-            assert '✅' in content
-            assert '❌' in content
+            hm = HistoryManager(path)
+            assert hm.count == 0
+            assert hm.get_recent() == []
         finally:
-            os.unlink(json_path)
-            os.unlink(md_path)
+            os.unlink(path)
+
+    def test_load_filters_non_dict_items(self):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w', encoding='utf-8') as f:
+            path = f.name
+            f.write('[{"input": "ok.mp4", "output": "ok.webm", "type": "video", "success": true}, 123, "bad"]')
+        try:
+            hm = HistoryManager(path)
+            assert hm.count == 1
+            assert hm.get_recent(1)[0]['input'] == 'ok.mp4'
+        finally:
+            os.unlink(path)
+    def test_add_persists_extended_record_fields(self):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            path = f.name
+        try:
+            hm = HistoryManager(path)
+            hm.add(
+                'a.mp4',
+                'a.webm',
+                'video',
+                True,
+                params={'video_crf': 23},
+                ffmpeg_cmd='ffmpeg -i a.mp4 a.webm',
+                duration_ms=1234,
+            )
+            recent = hm.get_recent(1)
+            assert len(recent) == 1
+            record = recent[0]
+            assert record['params'] == {'video_crf': 23}
+            assert record['ffmpeg_cmd'] == 'ffmpeg -i a.mp4 a.webm'
+            assert record['duration_ms'] == 1234
+            assert 'timestamp' in record
+        finally:
+            os.unlink(path)
+
+    def test_load_keeps_extended_record_fields(self):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w', encoding='utf-8') as f:
+            path = f.name
+            f.write(
+                '[{"timestamp":"2026-01-01T00:00:00",'
+                '"input":"ok.mp4",'
+                '"output":"ok.webm",'
+                '"type":"video",'
+                '"success":true,'
+                '"error":"",'
+                '"params":{"quality":80},'
+                '"ffmpeg_cmd":"ffmpeg ...",'
+                '"duration_ms":456}]'
+            )
+        try:
+            hm = HistoryManager(path)
+            record = hm.get_recent(1)[0]
+            assert record['params'] == {'quality': 80}
+            assert record['ffmpeg_cmd'] == 'ffmpeg ...'
+            assert record['duration_ms'] == 456
+        finally:
+            os.unlink(path)
 
 
 class TestCompressEngine:

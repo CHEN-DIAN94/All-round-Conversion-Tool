@@ -13,9 +13,6 @@
 QMainWindow, #CentralWidget {
     background-color: #1e1e2e;
 }
-QMainWindow, #CentralWidget {
-    background-color: #1e1e2e;
-}
 
 /* ---------- 标题区 ---------- */
 #HeaderArea {
@@ -32,7 +29,6 @@ QMainWindow, #CentralWidget {
 #AppSubtitle {
     font-size: 9.5pt;
     color: #a0a0c0;
-    letter-spacing: 2px;
 }
 #AppIcon {
     border-radius: 10px;
@@ -166,6 +162,7 @@ QSpinBox, QSlider {
     border-radius: 6px;
     padding: 4px 8px;
     color: #e0e0e0;
+    min-height: 36px;
 }
 QSpinBox::up-button, QSpinBox::down-button {
     background-color: #3a3a4e;
@@ -418,6 +415,11 @@ QProgressDialog {
 }
 
 /* ========== 补充缺失的深色组件样式 ========== */
+
+/* QComboBox 通用样式 */
+QComboBox {
+    min-height: 36px;
+}
 
 /* QComboBox 通用弹出框 fallback */
 QComboBox QAbstractItemView {
