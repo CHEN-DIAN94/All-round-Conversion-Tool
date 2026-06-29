@@ -3,16 +3,17 @@
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        ('bin/ffmpeg.exe', 'bin'),
+    ],
     datas=[
         ('icon.ico', '.'),
         ('themes', 'themes'),
-        ('widgets.py', '.'),
     ],
     hiddenimports=[
         # PyQt6 完整模块
         'PyQt6', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets',
-        'PyQt6.sip',
+        'PyQt6.QtNetwork', 'PyQt6.sip',
         # 项目模块
         'engines', 'engines._common', 'engines.ffmpeg_core', 'engines.image_engine',
         'engines.excel_engine', 'engines.document_engine', 'engines.format_handlers',
@@ -20,7 +21,7 @@ a = Analysis(
         'engines.watermark_engine', 'engines.pdf_tools', 'engines.video_compress',
         'engines.image_resize', 'engines.pdf_convert', 'engines.ffmpeg_utils',
         'formats', 'widgets', 'constants', 'presets', 'history',
-        'logging_config', 'themes', 'themes.cute_anim', 'themes.warm_anim',
+        'logging_config', 'monitor', 'themes', 'themes.cute_anim', 'themes.warm_anim',
         'cli', 'utils', 'workers',
         'ui', 'ui_file_table', 'ui_conversion', 'ui_settings',
         # 第三方库

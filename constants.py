@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 # 版本信息
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 
 # 文件限制
 MAX_FILES_PER_BATCH = 500
